@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pandas as pd
+
 from config import load_settings
 from utils import ensure_directory
 from symbol_loader import load_symbols
@@ -9,7 +11,7 @@ from data_fetcher import (
     fetch_from_ib,
     describe_dataset,
 )
-from poc_calculator import calculate_poc, find_nearest_untouched_levels
+from poc_calculator import calculate_poc, build_compact_nearest_summary
 
 
 def main() -> None:
@@ -83,9 +85,9 @@ def main() -> None:
 
     if nearest_enabled and not level_status_enabled:
         print("[WARN] nearest_untouched is enabled but level_status is disabled.")
-        print("[WARN] Nearest untouched summary needs Touched metadata, so it will be skipped.")
+        print("[WARN] Summary needs Touched metadata, so it will be skipped.")
 
-    nearest_summary_rows = []
+    summary_rows = []
 
     for symbol in symbols:
         print(f"\n=== Processing {symbol} ===")
@@ -131,50 +133,47 @@ def main() -> None:
 
         if nearest_enabled and level_status_enabled and "Touched" in result.columns:
             last_close = float(df["Close"].iloc[-1])
-            nearest = find_nearest_untouched_levels(result, last_close)
-            nearest["Symbol"] = symbol
-            nearest_summary_rows.append(nearest)
-
-            print(
-                f"[OK] Nearest untouched for {symbol}: "
-                f"above={nearest['NearestUntouchedAbove']}, "
-                f"below={nearest['NearestUntouchedBelow']}"
+            summary_row = build_compact_nearest_summary(
+                symbol=symbol,
+                poc_df=result,
+                last_close=last_close,
+                selected_periods=selected_periods,
             )
+            summary_rows.append(summary_row)
+            print(f"[OK] Built compact nearest summary for {symbol}")
 
-    if nearest_enabled and level_status_enabled and save_summary_csv and nearest_summary_rows:
-        summary_df = load_summary_dataframe(nearest_summary_rows)
+    if nearest_enabled and level_status_enabled and save_summary_csv and summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+
+        preferred_order = [
+            "Ticker",
+            "Last Price",
+            "YPOC Long Price",
+            "YPOC Long Dist",
+            "YPOC Short Price",
+            "YPOC Short Dist",
+            "MPOC Long Price",
+            "MPOC Long Dist",
+            "MPOC Short Price",
+            "MPOC Short Dist",
+            "WPOC Long Price",
+            "WPOC Long Dist",
+            "WPOC Short Price",
+            "WPOC Short Dist",
+        ]
+
+        existing_cols = [c for c in preferred_order if c in summary_df.columns]
+        remaining_cols = [c for c in summary_df.columns if c not in existing_cols]
+        summary_df = summary_df[existing_cols + remaining_cols]
+
         summary_output = Path(summary_csv_path)
         summary_output.parent.mkdir(parents=True, exist_ok=True)
         summary_df.to_csv(summary_output, index=False)
-        print(f"\n[OK] Saved nearest untouched summary to {summary_output}")
+
+        print(f"\n[OK] Saved compact nearest summary to {summary_output}")
 
     print("\n" + "-" * 50)
     print("Done.")
-
-
-def load_summary_dataframe(rows: list[dict]):
-    import pandas as pd
-
-    df = pd.DataFrame(rows)
-
-    preferred_order = [
-        "Symbol",
-        "LastClose",
-        "NearestUntouchedAbove",
-        "NearestUntouchedAbove_PeriodType",
-        "NearestUntouchedAbove_PeriodEnd",
-        "NearestUntouchedAbove_Distance",
-        "NearestUntouchedAbove_DistancePct",
-        "NearestUntouchedBelow",
-        "NearestUntouchedBelow_PeriodType",
-        "NearestUntouchedBelow_PeriodEnd",
-        "NearestUntouchedBelow_Distance",
-        "NearestUntouchedBelow_DistancePct",
-    ]
-
-    existing_cols = [c for c in preferred_order if c in df.columns]
-    remaining_cols = [c for c in df.columns if c not in existing_cols]
-    return df[existing_cols + remaining_cols]
 
 
 if __name__ == "__main__":
