@@ -48,11 +48,16 @@ poc:
     yearly: true
 
   keep_last:
-    weekly: 2
-    monthly: 2
-    yearly: 1
+    weekly: 5
+    monthly: 5
+    yearly: 3
 
   level_status:
     enabled: true
     track_touch: true
     track_cross: true
+
+  nearest_untouched:
+    enabled: true
+    save_summary_csv: true
+    summary_csv_path: "data/processed/poc_nearest_summary.csv"
