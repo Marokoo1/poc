@@ -1,6 +1,3 @@
-*** Begin Patch
-*** Delete File: src/poc_calculator.py
-*** Add File: src/poc_calculator.py
 +from __future__ import annotations
 +
 +import pandas as pd
