@@ -1,3 +1,11 @@
+Priste!! přidat TLS parser pro AmiBroker/YahooDownloader workflow
+
+začít konečně psát první skutečný výpočet měsíčního POC
+
+Za mě je lepší nejdřív TLS parser, pokud chceš mít vstupy vyřešené opravdu pořádně hned. Pokud ne, jdeme na POC logiku.
+
+
+
 # Notes
 
 ## Aktuální rozhodnutí
