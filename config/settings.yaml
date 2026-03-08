@@ -40,3 +40,14 @@ ib:
   host: "127.0.0.1"
   port: 7497
   client_id: 1
+
+  poc:
+  periods:
+    weekly: true
+    monthly: true
+    yearly: true
+
+  keep_last:
+    weekly: 3
+    monthly: 3
+    yearly: 2
