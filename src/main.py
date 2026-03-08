@@ -30,11 +30,6 @@ def main() -> None:
     print(f"Universe mode: {universe_mode}")
     print(f"Data mode: {data_mode}")
     print(f"Symbols: {symbols}")
-    print("-" * 50)
-
-    if not symbols:
-        print("[WARN] No symbols loaded. Exiting.")
-        return
 
     poc_settings = settings.get("poc", {})
     period_flags = poc_settings.get(
@@ -54,13 +49,15 @@ def main() -> None:
         },
     )
 
-    selected_periods = [
-        name for name, enabled in period_flags.items() if enabled
-    ]
+    selected_periods = [name for name, enabled in period_flags.items() if enabled]
 
     print(f"POC periods enabled: {selected_periods}")
     print(f"POC keep_last: {keep_last}")
     print("-" * 50)
+
+    if not symbols:
+        print("[WARN] No symbols loaded. Exiting.")
+        return
 
     if not selected_periods:
         print("[WARN] No POC periods enabled in settings. Exiting.")
