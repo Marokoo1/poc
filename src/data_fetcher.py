@@ -16,6 +16,39 @@ COLUMN_ALIASES = {
 }
 
 
+def flatten_yahoo_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    yfinance může vracet MultiIndex sloupce i pro jeden ticker.
+    Tady je převedeme na obyčejné názvy typu Open, High, Low...
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        flattened = []
+
+        for col in df.columns:
+            # col bývá tuple, např. ('Close', 'SPY') nebo podobně
+            parts = [str(part).strip() for part in col if str(part).strip() not in ("", "None")]
+            if not parts:
+                flattened.append("")
+                continue
+
+            # chceme vybrat hlavní OHLCV název
+            chosen = None
+            for part in parts:
+                if part.lower() in COLUMN_ALIASES:
+                    chosen = COLUMN_ALIASES[part.lower()]
+                    break
+
+            if chosen is None:
+                # fallback: vezmi první část
+                chosen = parts[0]
+
+            flattened.append(chosen)
+
+        df.columns = flattened
+
+    return df
+
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
 
@@ -36,6 +69,7 @@ def standardize_ohlcv_dataframe(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         print(f"[WARN] Empty dataset for {symbol}")
         return pd.DataFrame()
 
+    df = flatten_yahoo_columns(df)
     df = normalize_columns(df)
 
     missing_columns = [col for col in STANDARD_COLUMNS if col not in df.columns]
@@ -103,6 +137,7 @@ def fetch_yahoo_data(symbol: str, yahoo_config: dict, raw_data_dir: str) -> pd.D
             interval=interval,
             auto_adjust=auto_adjust,
             progress=False,
+            group_by="column",
         )
     except Exception as e:
         print(f"[ERROR] Yahoo download failed for {symbol}: {e}")
@@ -113,6 +148,7 @@ def fetch_yahoo_data(symbol: str, yahoo_config: dict, raw_data_dir: str) -> pd.D
         return pd.DataFrame()
 
     df = df.reset_index()
+    df = flatten_yahoo_columns(df)
 
     if "Adj Close" in df.columns:
         df = df.drop(columns=["Adj Close"])
