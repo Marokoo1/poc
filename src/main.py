@@ -49,10 +49,18 @@ def main() -> None:
         },
     )
 
+    level_status = poc_settings.get("level_status", {})
+    level_status_enabled = level_status.get("enabled", False)
+    track_touch = level_status.get("track_touch", True)
+    track_cross = level_status.get("track_cross", True)
+
     selected_periods = [name for name, enabled in period_flags.items() if enabled]
 
     print(f"POC periods enabled: {selected_periods}")
     print(f"POC keep_last: {keep_last}")
+    print(f"Level status enabled: {level_status_enabled}")
+    print(f"Track touch: {track_touch}")
+    print(f"Track cross: {track_cross}")
     print("-" * 50)
 
     if not symbols:
@@ -90,6 +98,9 @@ def main() -> None:
             df,
             periods=selected_periods,
             keep_last=keep_last,
+            include_level_status=level_status_enabled,
+            track_touch=track_touch,
+            track_cross=track_cross,
         )
 
         if result.empty:
