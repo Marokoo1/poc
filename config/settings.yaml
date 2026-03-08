@@ -1,0 +1,19 @@
+project:
+  name: "POC Project"
+
+data_source:
+  mode: "csv"   # csv | ib
+
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+
+symbols:
+  - AAPL
+  - MSFT
+  - SPY
+
+ib:
+  host: "127.0.0.1"
+  port: 7497
+  client_id: 1
