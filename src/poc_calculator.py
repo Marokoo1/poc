@@ -255,10 +255,10 @@ def enrich_poc_with_level_status(
             cross_counts.append(int(cross_mask.sum()))
 
             if not cross_rows.empty:
-                first_cross_idx = cross_rows.index[-1]
-                if cross_up_mask.loc[first_cross_idx]:
+                last_cross_idx = cross_rows.index[-1]
+                if bool(cross_up_mask.loc[last_cross_idx]):
                     last_cross_directions.append("up")
-                elif cross_down_mask.loc[first_cross_idx]:
+                elif bool(cross_down_mask.loc[last_cross_idx]):
                     last_cross_directions.append("down")
                 else:
                     last_cross_directions.append(None)
@@ -280,6 +280,70 @@ def enrich_poc_with_level_status(
         result["CurrentSide"] = current_sides
 
     return result
+
+
+def find_nearest_untouched_levels(
+    poc_df: pd.DataFrame,
+    last_close: float,
+) -> dict:
+    """
+    Najde nejbližší nedotčený POC nad a pod aktuální cenou.
+    Distance je definována jako:
+        LastClose - POC
+
+    Tedy:
+    - kladná hodnota => cena je nad levelem
+    - záporná hodnota => cena je pod levelem
+    """
+    summary = {
+        "LastClose": round(float(last_close), 4),
+        "NearestUntouchedAbove": None,
+        "NearestUntouchedAbove_PeriodType": None,
+        "NearestUntouchedAbove_PeriodEnd": None,
+        "NearestUntouchedAbove_Distance": None,
+        "NearestUntouchedAbove_DistancePct": None,
+        "NearestUntouchedBelow": None,
+        "NearestUntouchedBelow_PeriodType": None,
+        "NearestUntouchedBelow_PeriodEnd": None,
+        "NearestUntouchedBelow_Distance": None,
+        "NearestUntouchedBelow_DistancePct": None,
+    }
+
+    if poc_df.empty or "Touched" not in poc_df.columns:
+        return summary
+
+    untouched = poc_df.loc[poc_df["Touched"] == False].copy()
+    if untouched.empty:
+        return summary
+
+    above = untouched.loc[untouched["POC"] > last_close].copy()
+    below = untouched.loc[untouched["POC"] < last_close].copy()
+
+    if not above.empty:
+        above["GapToPrice"] = above["POC"] - last_close
+        nearest_above = above.sort_values("GapToPrice", ascending=True).iloc[0]
+        distance = round(float(last_close - nearest_above["POC"]), 4)
+        distance_pct = round(((last_close - float(nearest_above["POC"])) / last_close) * 100.0, 4)
+
+        summary["NearestUntouchedAbove"] = round(float(nearest_above["POC"]), 4)
+        summary["NearestUntouchedAbove_PeriodType"] = nearest_above["PeriodType"]
+        summary["NearestUntouchedAbove_PeriodEnd"] = nearest_above["PeriodEnd"]
+        summary["NearestUntouchedAbove_Distance"] = distance
+        summary["NearestUntouchedAbove_DistancePct"] = distance_pct
+
+    if not below.empty:
+        below["GapToPrice"] = last_close - below["POC"]
+        nearest_below = below.sort_values("GapToPrice", ascending=True).iloc[0]
+        distance = round(float(last_close - nearest_below["POC"]), 4)
+        distance_pct = round(((last_close - float(nearest_below["POC"])) / last_close) * 100.0, 4)
+
+        summary["NearestUntouchedBelow"] = round(float(nearest_below["POC"]), 4)
+        summary["NearestUntouchedBelow_PeriodType"] = nearest_below["PeriodType"]
+        summary["NearestUntouchedBelow_PeriodEnd"] = nearest_below["PeriodEnd"]
+        summary["NearestUntouchedBelow_Distance"] = distance
+        summary["NearestUntouchedBelow_DistancePct"] = distance_pct
+
+    return summary
 
 
 def calculate_poc(
