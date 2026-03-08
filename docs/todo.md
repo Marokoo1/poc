@@ -1,18 +1,12 @@
-- [ ] načítání CSV
-
-- [ ] první měsíční POC
-
-- [ ] validita levelu
-
-- [ ] export do CSV
-
-- [ ] napojení na IB
-
 # TODO
 
 - [x] založit GitHub repo
 - [x] naklonovat repo
+- [x] spustit základní kostru projektu
 - [ ] upravit CSV loader
 - [ ] přidat testovací CSV
-- [ ] spočítat měsíční POC
-- [ ] spočítat roční POC
+- [ ] spočítat první měsíční POC
+- [ ] spočítat první roční POC
+- [ ] přidat validitu levelů
+- [ ] export výsledků
+- [ ] napojení na IB
