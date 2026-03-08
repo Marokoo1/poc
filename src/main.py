@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from config import load_settings
 from utils import ensure_directory
 from symbol_loader import load_symbols
@@ -21,6 +23,7 @@ def main() -> None:
 
     universe_mode = settings["universe"]["mode"]
     data_mode = settings["data_source"]["mode"]
+
     symbols = load_symbols(settings["universe"])
 
     print(f"Project: {settings['project']['name']}")
@@ -60,8 +63,13 @@ def main() -> None:
 
         if result.empty:
             print(f"[INFO] No data processed for {symbol}")
-        else:
-            print(f"[OK] Processed data for {symbol}: {len(result)} rows")
+            continue
+
+        output_path = Path(processed_data_dir) / f"{symbol}_poc.csv"
+        result.to_csv(output_path, index=False)
+
+        print(f"[OK] Processed data for {symbol}: {len(result)} rows")
+        print(f"[OK] Saved processed POC for {symbol} to {output_path}")
 
     print("\n" + "-" * 50)
     print("Done.")
