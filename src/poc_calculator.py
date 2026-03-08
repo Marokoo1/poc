@@ -9,6 +9,12 @@ VALID_PERIODS = {
     "yearly": "Y",
 }
 
+PERIOD_LABELS = {
+    "yearly": "YPOC",
+    "monthly": "MPOC",
+    "weekly": "WPOC",
+}
+
 
 def auto_tick_size(df: pd.DataFrame) -> float:
     if df.empty:
@@ -282,68 +288,75 @@ def enrich_poc_with_level_status(
     return result
 
 
-def find_nearest_untouched_levels(
-    poc_df: pd.DataFrame,
-    last_close: float,
-) -> dict:
+def _nearest_long_short_for_period(period_df: pd.DataFrame, last_close: float) -> dict:
     """
-    Najde nejbližší nedotčený POC nad a pod aktuální cenou.
-    Distance je definována jako:
-        LastClose - POC
-
-    Tedy:
-    - kladná hodnota => cena je nad levelem
-    - záporná hodnota => cena je pod levelem
+    Long = nejbližší nedotčený POC pod cenou.
+    Short = nejbližší nedotčený POC nad cenou.
+    Dist = LastClose - POC
     """
-    summary = {
-        "LastClose": round(float(last_close), 4),
-        "NearestUntouchedAbove": None,
-        "NearestUntouchedAbove_PeriodType": None,
-        "NearestUntouchedAbove_PeriodEnd": None,
-        "NearestUntouchedAbove_Distance": None,
-        "NearestUntouchedAbove_DistancePct": None,
-        "NearestUntouchedBelow": None,
-        "NearestUntouchedBelow_PeriodType": None,
-        "NearestUntouchedBelow_PeriodEnd": None,
-        "NearestUntouchedBelow_Distance": None,
-        "NearestUntouchedBelow_DistancePct": None,
+    out = {
+        "Long Price": None,
+        "Long Dist": None,
+        "Short Price": None,
+        "Short Dist": None,
     }
 
-    if poc_df.empty or "Touched" not in poc_df.columns:
-        return summary
+    if period_df.empty or "Touched" not in period_df.columns:
+        return out
 
-    untouched = poc_df.loc[poc_df["Touched"] == False].copy()
+    untouched = period_df.loc[period_df["Touched"] == False].copy()
     if untouched.empty:
-        return summary
+        return out
 
-    above = untouched.loc[untouched["POC"] > last_close].copy()
-    below = untouched.loc[untouched["POC"] < last_close].copy()
+    below_price = untouched.loc[untouched["POC"] < last_close].copy()
+    above_price = untouched.loc[untouched["POC"] > last_close].copy()
 
-    if not above.empty:
-        above["GapToPrice"] = above["POC"] - last_close
-        nearest_above = above.sort_values("GapToPrice", ascending=True).iloc[0]
-        distance = round(float(last_close - nearest_above["POC"]), 4)
-        distance_pct = round(((last_close - float(nearest_above["POC"])) / last_close) * 100.0, 4)
+    if not below_price.empty:
+        below_price["Gap"] = last_close - below_price["POC"]
+        nearest_long = below_price.sort_values("Gap", ascending=True).iloc[0]
+        out["Long Price"] = round(float(nearest_long["POC"]), 4)
+        out["Long Dist"] = round(float(last_close - nearest_long["POC"]), 4)
 
-        summary["NearestUntouchedAbove"] = round(float(nearest_above["POC"]), 4)
-        summary["NearestUntouchedAbove_PeriodType"] = nearest_above["PeriodType"]
-        summary["NearestUntouchedAbove_PeriodEnd"] = nearest_above["PeriodEnd"]
-        summary["NearestUntouchedAbove_Distance"] = distance
-        summary["NearestUntouchedAbove_DistancePct"] = distance_pct
+    if not above_price.empty:
+        above_price["Gap"] = above_price["POC"] - last_close
+        nearest_short = above_price.sort_values("Gap", ascending=True).iloc[0]
+        out["Short Price"] = round(float(nearest_short["POC"]), 4)
+        out["Short Dist"] = round(float(last_close - nearest_short["POC"]), 4)
 
-    if not below.empty:
-        below["GapToPrice"] = last_close - below["POC"]
-        nearest_below = below.sort_values("GapToPrice", ascending=True).iloc[0]
-        distance = round(float(last_close - nearest_below["POC"]), 4)
-        distance_pct = round(((last_close - float(nearest_below["POC"])) / last_close) * 100.0, 4)
+    return out
 
-        summary["NearestUntouchedBelow"] = round(float(nearest_below["POC"]), 4)
-        summary["NearestUntouchedBelow_PeriodType"] = nearest_below["PeriodType"]
-        summary["NearestUntouchedBelow_PeriodEnd"] = nearest_below["PeriodEnd"]
-        summary["NearestUntouchedBelow_Distance"] = distance
-        summary["NearestUntouchedBelow_DistancePct"] = distance_pct
 
-    return summary
+def build_compact_nearest_summary(
+    symbol: str,
+    poc_df: pd.DataFrame,
+    last_close: float,
+    selected_periods: list[str],
+) -> dict:
+    row = {
+        "Ticker": symbol,
+        "Last Price": round(float(last_close), 4),
+    }
+
+    for period in ["yearly", "monthly", "weekly"]:
+        label = PERIOD_LABELS[period]
+
+        row[f"{label} Long Price"] = None
+        row[f"{label} Long Dist"] = None
+        row[f"{label} Short Price"] = None
+        row[f"{label} Short Dist"] = None
+
+        if period not in selected_periods:
+            continue
+
+        subset = poc_df.loc[poc_df["PeriodType"] == period].copy()
+        nearest = _nearest_long_short_for_period(subset, last_close)
+
+        row[f"{label} Long Price"] = nearest["Long Price"]
+        row[f"{label} Long Dist"] = nearest["Long Dist"]
+        row[f"{label} Short Price"] = nearest["Short Price"]
+        row[f"{label} Short Dist"] = nearest["Short Dist"]
+
+    return row
 
 
 def calculate_poc(
