@@ -51,3 +51,8 @@ poc:
     weekly: 3
     monthly: 3
     yearly: 2
+
+level_status:
+    enabled: true
+    track_touch: true
+    track_cross: true
