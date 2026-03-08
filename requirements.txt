@@ -1,0 +1,3 @@
+pandas
+pyyaml
+ib_insync
