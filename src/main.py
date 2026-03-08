@@ -1,5 +1,6 @@
 from config import load_settings
 from utils import ensure_directory
+from symbol_loader import load_symbols
 from data_fetcher import (
     load_csv_data,
     fetch_yahoo_data,
@@ -18,33 +19,39 @@ def main() -> None:
     ensure_directory(raw_data_dir)
     ensure_directory(processed_data_dir)
 
-    mode = settings["data_source"]["mode"]
-    symbols = settings["symbols"]
+    universe_mode = settings["universe"]["mode"]
+    data_mode = settings["data_source"]["mode"]
+    symbols = load_symbols(settings["universe"])
 
     print(f"Project: {settings['project']['name']}")
-    print(f"Data mode: {mode}")
+    print(f"Universe mode: {universe_mode}")
+    print(f"Data mode: {data_mode}")
     print(f"Symbols: {symbols}")
     print("-" * 50)
+
+    if not symbols:
+        print("[WARN] No symbols loaded. Exiting.")
+        return
 
     for symbol in symbols:
         print(f"\n=== Processing {symbol} ===")
 
-        if mode == "csv":
+        if data_mode == "csv":
             df = load_csv_data(
                 symbol=symbol,
                 raw_data_dir=raw_data_dir,
                 file_pattern=settings["csv"]["file_pattern"],
             )
-        elif mode == "yahoo":
+        elif data_mode == "yahoo":
             df = fetch_yahoo_data(
                 symbol=symbol,
                 yahoo_config=settings["yahoo"],
                 raw_data_dir=raw_data_dir,
             )
-        elif mode == "ib":
+        elif data_mode == "ib":
             df = fetch_from_ib(symbol, settings["ib"])
         else:
-            print(f"[ERROR] Unknown data mode: {mode}")
+            print(f"[ERROR] Unknown data mode: {data_mode}")
             continue
 
         describe_dataset(df, symbol)
