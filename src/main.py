@@ -36,6 +36,36 @@ def main() -> None:
         print("[WARN] No symbols loaded. Exiting.")
         return
 
+    poc_settings = settings.get("poc", {})
+    period_flags = poc_settings.get(
+        "periods",
+        {
+            "weekly": True,
+            "monthly": True,
+            "yearly": True,
+        },
+    )
+    keep_last = poc_settings.get(
+        "keep_last",
+        {
+            "weekly": 5,
+            "monthly": 5,
+            "yearly": 3,
+        },
+    )
+
+    selected_periods = [
+        name for name, enabled in period_flags.items() if enabled
+    ]
+
+    print(f"POC periods enabled: {selected_periods}")
+    print(f"POC keep_last: {keep_last}")
+    print("-" * 50)
+
+    if not selected_periods:
+        print("[WARN] No POC periods enabled in settings. Exiting.")
+        return
+
     for symbol in symbols:
         print(f"\n=== Processing {symbol} ===")
 
@@ -59,7 +89,11 @@ def main() -> None:
 
         describe_dataset(df, symbol)
 
-        result = calculate_poc(df)
+        result = calculate_poc(
+            df,
+            periods=selected_periods,
+            keep_last=keep_last,
+        )
 
         if result.empty:
             print(f"[INFO] No data processed for {symbol}")
