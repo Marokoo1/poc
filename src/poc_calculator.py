@@ -9,12 +9,6 @@ VALID_PERIODS = {
     "yearly": "Y",
 }
 
-PERIOD_LABELS = {
-    "yearly": "YPOC",
-    "monthly": "MPOC",
-    "weekly": "WPOC",
-}
-
 
 def auto_tick_size(df: pd.DataFrame) -> float:
     if df.empty:
@@ -289,11 +283,6 @@ def enrich_poc_with_level_status(
 
 
 def _nearest_long_short_for_period(period_df: pd.DataFrame, last_close: float) -> dict:
-    """
-    Long = nejbližší nedotčený POC pod cenou.
-    Short = nejbližší nedotčený POC nad cenou.
-    Dist = LastClose - POC
-    """
     out = {
         "Long Price": None,
         "Long Dist": None,
@@ -334,16 +323,22 @@ def build_compact_nearest_summary(
 ) -> dict:
     row = {
         "Ticker": symbol,
-        "Last Price": round(float(last_close), 4),
+        "Last": round(float(last_close), 4),
+    }
+
+    period_prefix = {
+        "yearly": "Y",
+        "monthly": "M",
+        "weekly": "W",
     }
 
     for period in ["yearly", "monthly", "weekly"]:
-        label = PERIOD_LABELS[period]
+        prefix = period_prefix[period]
 
-        row[f"{label} Long Price"] = None
-        row[f"{label} Long Dist"] = None
-        row[f"{label} Short Price"] = None
-        row[f"{label} Short Dist"] = None
+        row[f"{prefix}L Price"] = None
+        row[f"{prefix}L Dist"] = None
+        row[f"{prefix}S Price"] = None
+        row[f"{prefix}S Dist"] = None
 
         if period not in selected_periods:
             continue
@@ -351,10 +346,10 @@ def build_compact_nearest_summary(
         subset = poc_df.loc[poc_df["PeriodType"] == period].copy()
         nearest = _nearest_long_short_for_period(subset, last_close)
 
-        row[f"{label} Long Price"] = nearest["Long Price"]
-        row[f"{label} Long Dist"] = nearest["Long Dist"]
-        row[f"{label} Short Price"] = nearest["Short Price"]
-        row[f"{label} Short Dist"] = nearest["Short Dist"]
+        row[f"{prefix}L Price"] = nearest["Long Price"]
+        row[f"{prefix}L Dist"] = nearest["Long Dist"]
+        row[f"{prefix}S Price"] = nearest["Short Price"]
+        row[f"{prefix}S Dist"] = nearest["Short Dist"]
 
     return row
 
