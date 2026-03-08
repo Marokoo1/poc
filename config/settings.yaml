@@ -2,7 +2,7 @@ project:
   name: "POC Project"
 
 universe:
-  mode: "manual"   # manual | txt_list | csv_list | tls
+  mode: "csv_list"   # manual | txt_list | csv_list | tls
 
   manual:
     symbols:
