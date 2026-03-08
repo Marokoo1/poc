@@ -1,12 +1,12 @@
-[ ] načítání CSV
+- [ ] načítání CSV
 
-[ ] první měsíční POC
+- [ ] první měsíční POC
 
-[ ] validita levelu
+- [ ] validita levelu
 
-[ ] export do CSV
+- [ ] export do CSV
 
-[ ] napojení na IB
+- [ ] napojení na IB
 
 # TODO
 
