@@ -1,0 +1,30 @@
+
+---
+
+### `.gitignore`
+
+```gitignore
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data outputs
+data/raw/*.csv
+data/processed/*.csv
+
+# Secrets
+.env
