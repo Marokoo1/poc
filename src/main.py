@@ -1,6 +1,11 @@
 from config import load_settings
 from utils import ensure_directory
-from data_fetcher import load_csv_data, fetch_from_ib
+from data_fetcher import (
+    load_csv_data,
+    fetch_yahoo_data,
+    fetch_from_ib,
+    describe_dataset,
+)
 from poc_calculator import calculate_poc
 
 
@@ -19,16 +24,30 @@ def main() -> None:
     print(f"Project: {settings['project']['name']}")
     print(f"Data mode: {mode}")
     print(f"Symbols: {symbols}")
-    print("-" * 40)
+    print("-" * 50)
 
     for symbol in symbols:
+        print(f"\n=== Processing {symbol} ===")
+
         if mode == "csv":
-            df = load_csv_data(symbol, raw_data_dir)
+            df = load_csv_data(
+                symbol=symbol,
+                raw_data_dir=raw_data_dir,
+                file_pattern=settings["csv"]["file_pattern"],
+            )
+        elif mode == "yahoo":
+            df = fetch_yahoo_data(
+                symbol=symbol,
+                yahoo_config=settings["yahoo"],
+                raw_data_dir=raw_data_dir,
+            )
         elif mode == "ib":
             df = fetch_from_ib(symbol, settings["ib"])
         else:
             print(f"[ERROR] Unknown data mode: {mode}")
             continue
+
+        describe_dataset(df, symbol)
 
         result = calculate_poc(df)
 
@@ -37,7 +56,7 @@ def main() -> None:
         else:
             print(f"[OK] Processed data for {symbol}: {len(result)} rows")
 
-    print("-" * 40)
+    print("\n" + "-" * 50)
     print("Done.")
 
 
