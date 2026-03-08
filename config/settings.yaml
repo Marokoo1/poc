@@ -2,16 +2,25 @@ project:
   name: "POC Project"
 
 data_source:
-  mode: "csv"   # csv | ib
+  mode: "yahoo"   # yahoo | csv | ib
 
 paths:
   raw_data_dir: "data/raw"
   processed_data_dir: "data/processed"
 
 symbols:
+  - SPY
   - AAPL
   - MSFT
-  - SPY
+
+csv:
+  file_pattern: "{symbol}.csv"
+
+yahoo:
+  period: "2y"
+  interval: "1d"
+  auto_adjust: false
+  save_downloaded_csv: true
 
 ib:
   host: "127.0.0.1"
