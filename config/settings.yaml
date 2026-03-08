@@ -41,7 +41,7 @@ ib:
   port: 7497
   client_id: 1
 
-  poc:
+poc:
   periods:
     weekly: true
     monthly: true
