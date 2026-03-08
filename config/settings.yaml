@@ -48,11 +48,11 @@ poc:
     yearly: true
 
   keep_last:
-    weekly: 3
-    monthly: 3
-    yearly: 2
+    weekly: 2
+    monthly: 2
+    yearly: 1
 
-level_status:
+  level_status:
     enabled: true
     track_touch: true
     track_cross: true
