@@ -1,17 +1,31 @@
 project:
   name: "POC Project"
 
+universe:
+  mode: "manual"   # manual | txt_list | csv_list | tls
+
+  manual:
+    symbols:
+      - SPY
+      - AAPL
+      - MSFT
+
+  txt_list:
+    path: "input/watchlists/watchlist.txt"
+
+  csv_list:
+    path: "input/watchlists/watchlist.csv"
+    column: "Symbol"
+
+  tls:
+    path: "input/watchlists/watchlist.tls"
+
 data_source:
   mode: "yahoo"   # yahoo | csv | ib
 
 paths:
   raw_data_dir: "data/raw"
   processed_data_dir: "data/processed"
-
-symbols:
-  - SPY
-  - AAPL
-  - MSFT
 
 csv:
   file_pattern: "{symbol}.csv"
