@@ -1,6 +1,8 @@
 Plan na příště
 Cíl další session
 
+!!! DASBORD se NESPOUSTI SAM PO CALCULATOR.py !!!
+
 Napojit poc_dashboard.py na nový soubor data/processed/poc_levels_enriched.csv a začít používat enriched POC levely místo původního jednoduchého přehledu.
 
 Konkrétní kroky
