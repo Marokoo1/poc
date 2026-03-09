@@ -61,3 +61,26 @@ poc:
     enabled: true
     save_summary_csv: true
     summary_csv_path: "data/processed/poc_nearest_summary.csv"
+    
+ dashboard:
+  auto_open: false
+  default_data_source: "project_default"
+  data_sources:
+    project_default:
+      raw_data_dir: "data/raw"
+      processed_data_dir: "data/processed"
+      raw_file_pattern: "{ticker}.csv"
+      poc_file_pattern: "{ticker}_poc.csv"
+
+    archived_run:
+      raw_data_dir: "archive/2026-03-09/raw"
+      processed_data_dir: "archive/2026-03-09/processed"
+      raw_file_pattern: "{ticker}.csv"
+      poc_file_pattern: "{ticker}_poc.csv"
+
+    external_disk:
+      raw_data_dir: "/mnt/storage/poc/raw"
+      processed_data_dir: "/mnt/storage/poc/processed"
+      raw_file_pattern: "{ticker}.csv"
+      poc_file_pattern: "{ticker}_poc.csv"
+    
