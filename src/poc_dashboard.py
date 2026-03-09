@@ -149,12 +149,29 @@ def load_ohlcv_from_csv(raw_file_path: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=60)
-def load_poc_data(poc_file_path: str) -> pd.DataFrame:
+def load_poc_data(poc_file_path: str, ticker_hint: str | None = None) -> pd.DataFrame:
     path = Path(poc_file_path)
     if not path.exists():
         raise FileNotFoundError(f"POC soubor nebyl nalezen: {path}")
 
-    df = pd.read_csv(path, parse_dates=["PeriodStart", "PeriodEnd"])
+    df = pd.read_csv(path)
+
+    for col in ["PeriodStart", "PeriodEnd"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    if "Ticker" not in df.columns:
+        inferred_ticker = None
+        if ticker_hint:
+            inferred_ticker = str(ticker_hint).upper().strip()
+        else:
+            name = path.stem
+            if name.lower().endswith("_poc"):
+                inferred_ticker = name[:-4].upper().strip()
+            else:
+                inferred_ticker = name.upper().strip()
+        df["Ticker"] = inferred_ticker
+
     required = {
         "Ticker", "PeriodType", "Period", "PeriodStart", "PeriodEnd",
         "POC", "POC_Volume", "Period_High", "Period_Low", "Period_Close"
@@ -166,6 +183,11 @@ def load_poc_data(poc_file_path: str) -> pd.DataFrame:
     df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
     df["PeriodType"] = df["PeriodType"].astype(str).str.lower().str.strip()
     df["POC"] = pd.to_numeric(df["POC"], errors="coerce")
+    df["POC_Volume"] = pd.to_numeric(df["POC_Volume"], errors="coerce")
+    df["Period_High"] = pd.to_numeric(df["Period_High"], errors="coerce")
+    df["Period_Low"] = pd.to_numeric(df["Period_Low"], errors="coerce")
+    df["Period_Close"] = pd.to_numeric(df["Period_Close"], errors="coerce")
+
     return df.dropna(subset=["Ticker", "PeriodType", "POC", "PeriodStart", "PeriodEnd"]).copy()
 
 
@@ -282,8 +304,15 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
             )
 
     last_close = float(chart_df["Close"].iloc[-1])
-    fig.add_hline(y=last_close, line_width=1, line_dash="solid", line_color="#E5E7EB", opacity=0.45,
-                  annotation_text=f"Last {last_close:.2f}", annotation_position="top left")
+    fig.add_hline(
+        y=last_close,
+        line_width=1,
+        line_dash="solid",
+        line_color="#E5E7EB",
+        opacity=0.45,
+        annotation_text=f"Last {last_close:.2f}",
+        annotation_position="top left",
+    )
 
     fig.update_layout(
         title=dict(text=f"<b>{ticker}</b> – POC dashboard", x=0.02),
@@ -294,8 +323,12 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
         margin=dict(l=20, r=140 if settings.show_labels else 30, t=70, b=30),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
-        xaxis=dict(rangeslider=dict(visible=False), showgrid=True, gridcolor="rgba(148,163,184,0.10)",
-                   rangebreaks=[dict(bounds=["sat", "mon"])]),
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.10)",
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+        ),
         yaxis=dict(title="Cena", side="right", showgrid=True, gridcolor="rgba(148,163,184,0.10)", zeroline=False),
     )
     return fig
@@ -385,6 +418,9 @@ def main() -> None:
     st.sidebar.caption(f"Raw: `{raw_path}`")
     st.sidebar.caption(f"POC: `{poc_path}`")
 
+    ohlcv = None
+    poc_levels = None
+
     try:
         ohlcv = load_ohlcv_from_csv(str(raw_path))
     except Exception as exc:
@@ -392,12 +428,24 @@ def main() -> None:
         st.stop()
 
     try:
-        poc_levels = load_poc_data(str(poc_path))
+        poc_levels = load_poc_data(str(poc_path), ticker_hint=ticker)
     except Exception as exc:
         st.error(f"Nepodařilo se načíst POC data pro {ticker}: {exc}")
         st.stop()
 
+    if ohlcv is None:
+        st.error("OHLCV data nebyla načtena.")
+        st.stop()
+
+    if poc_levels is None:
+        st.error("POC data nebyla načtena.")
+        st.stop()
+
     ticker_levels = poc_levels[poc_levels["Ticker"] == ticker].copy()
+    if ticker_levels.empty:
+        st.warning(f"Pro ticker {ticker} nebyly v POC souboru nalezeny žádné levely.")
+        st.stop()
+
     enriched = enrich_levels(ticker_levels, ohlcv)
     filtered = filter_levels(enriched, chart_settings)
 
