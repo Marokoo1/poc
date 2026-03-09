@@ -2,3 +2,7 @@ pandas
 pyyaml
 yfinance
 ib_insync
+streamlit
+plotly
+yfinance
+pandas
