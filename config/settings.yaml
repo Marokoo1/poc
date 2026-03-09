@@ -2,21 +2,14 @@ project:
   name: "POC Project"
 
 universe:
-  mode: "csv_list"   # manual | txt_list | csv_list | tls
-
+  mode: "csv_list"
   manual:
-    symbols:
-      - SPY
-      - AAPL
-      - MSFT
-
+    symbols: ["SPY", "AAPL", "MSFT"]
   txt_list:
     path: "input/watchlists/watchlist.txt"
-
   csv_list:
     path: "input/watchlists/watchlist.csv"
     column: "Symbol"
-
   tls:
     path: "input/watchlists/watchlist.tls"
 
@@ -46,23 +39,20 @@ poc:
     weekly: true
     monthly: true
     yearly: true
-
   keep_last:
     weekly: 5
     monthly: 5
     yearly: 3
-
   level_status:
     enabled: true
     track_touch: true
     track_cross: true
-
   nearest_untouched:
     enabled: true
     save_summary_csv: true
     summary_csv_path: "data/processed/poc_nearest_summary.csv"
-    
- dashboard:
+
+dashboard:
   auto_open: false
   default_data_source: "project_default"
   data_sources:
@@ -83,4 +73,9 @@ poc:
       processed_data_dir: "/mnt/storage/poc/processed"
       raw_file_pattern: "{ticker}.csv"
       poc_file_pattern: "{ticker}_poc.csv"
-    
+
+    custom_export:
+      raw_data_dir: "exports/raw"
+      processed_data_dir: "exports/processed"
+      raw_file_pattern: "{ticker}_daily.csv"
+      poc_file_pattern: "{ticker}_poc.csv"
