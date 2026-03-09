@@ -98,6 +98,41 @@ def load_ohlcv(ticker: str, start: str) -> pd.DataFrame:
 
     return raw[["Open", "High", "Low", "Close", "Volume"]].copy()
 
+def load_all_poc_levels(processed_dir: Path) -> pd.DataFrame:
+    files = sorted(processed_dir.glob("*_poc.csv"))
+
+    if not files:
+        raise FileNotFoundError(
+            f"V {processed_dir} nebyly nalezeny žádné soubory *_poc.csv"
+        )
+
+    frames = []
+    for path in files:
+        df = pd.read_csv(path)
+
+        required = {
+            "Ticker",
+            "PeriodType",
+            "Period",
+            "PeriodStart",
+            "PeriodEnd",
+            "POC",
+            "POC_Volume",
+            "Period_High",
+            "Period_Low",
+            "Period_Close",
+        }
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"{path.name} nemá očekávané sloupce: {sorted(missing)}")
+
+        frames.append(df)
+
+    out = pd.concat(frames, ignore_index=True)
+    out["PeriodStart"] = pd.to_datetime(out["PeriodStart"])
+    out["PeriodEnd"] = pd.to_datetime(out["PeriodEnd"])
+    return out
+
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
