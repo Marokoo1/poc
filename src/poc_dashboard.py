@@ -1,20 +1,3 @@
-"""
-POC Dashboard - přehledný interaktivní dashboard pro Point of Control levely.
-
-Spuštění:
-    pip install streamlit plotly yfinance pandas
-    streamlit run poc_dashboard.py
-
-Co umí:
-- vybrat ticker
-- zapnout/vypnout weekly / monthly / yearly levely
-- filtrovat pouze validní (dosud netestované) levely
-- omezit počet zobrazených nejbližších levelů k aktuální ceně
-- zapnout/vypnout popisky levelů
-- měnit délku historie grafu
-- zobrazit tabulku levelů se signed distance (kladné = cena nad levelem, záporné = cena pod levelem)
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,38 +7,25 @@ from typing import Iterable
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import yfinance as yf
+import yaml
 
-# ============================================================
-# Nastavení
-# ============================================================
-
-DEFAULT_POC_FILE = "poc_output.csv"
-DEFAULT_HISTORY_START = "2024-01-01"
 
 PERIOD_STYLES = {
-    "weekly": {
-        "label": "Weekly",
-        "color": "#6EC1FF",
-        "width": 1.4,
-        "dash": "dot",
-        "rank": 3,
-    },
-    "monthly": {
-        "label": "Monthly",
-        "color": "#FFB84D",
-        "width": 2.2,
-        "dash": "dash",
-        "rank": 2,
-    },
-    "yearly": {
-        "label": "Yearly",
-        "color": "#FF6B6B",
-        "width": 3.2,
-        "dash": "solid",
-        "rank": 1,
-    },
+    "weekly": {"label": "Weekly", "color": "#6EC1FF", "width": 1.4, "dash": "dot", "rank": 3},
+    "monthly": {"label": "Monthly", "color": "#FFB84D", "width": 2.2, "dash": "dash", "rank": 2},
+    "yearly": {"label": "Yearly", "color": "#FF6B6B", "width": 3.2, "dash": "solid", "rank": 1},
 }
+
+STANDARD_OHLCV = ["Date", "Open", "High", "Low", "Close", "Volume"]
+
+
+@dataclass
+class DataSource:
+    name: str
+    raw_data_dir: Path
+    processed_data_dir: Path
+    raw_file_pattern: str = "{ticker}.csv"
+    poc_file_pattern: str = "{ticker}_poc.csv"
 
 
 @dataclass
@@ -69,11 +39,120 @@ class ChartSettings:
     extend_from_period_start: bool
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_poc_data(csv_path: str) -> pd.DataFrame:
-    path = Path(csv_path)
+@st.cache_data(show_spinner=False, ttl=60)
+def load_yaml_settings(settings_path: str) -> dict:
+    path = Path(settings_path)
     if not path.exists():
-        raise FileNotFoundError(f"Soubor nebyl nalezen: {path.resolve()}")
+        raise FileNotFoundError(f"Settings file nebyl nalezen: {path.resolve()}")
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def discover_project_root(settings_path: Path) -> Path:
+    return settings_path.parent.parent if settings_path.parent.name == "config" else settings_path.parent
+
+
+def build_sources(settings: dict, project_root: Path) -> tuple[dict[str, DataSource], str]:
+    sources: dict[str, DataSource] = {}
+
+    paths_cfg = settings.get("paths", {})
+    raw_dir = paths_cfg.get("raw_data_dir", "data/raw")
+    processed_dir = paths_cfg.get("processed_data_dir", "data/processed")
+    csv_cfg = settings.get("csv", {})
+
+    sources["project_default"] = DataSource(
+        name="project_default",
+        raw_data_dir=(project_root / raw_dir).resolve(),
+        processed_data_dir=(project_root / processed_dir).resolve(),
+        raw_file_pattern=csv_cfg.get("file_pattern", "{symbol}.csv").replace("{symbol}", "{ticker}"),
+        poc_file_pattern="{ticker}_poc.csv",
+    )
+
+    dashboard_cfg = settings.get("dashboard", {})
+    sources_cfg = dashboard_cfg.get("data_sources", {})
+    default_source = dashboard_cfg.get("default_data_source", "project_default")
+
+    for source_name, source_cfg in sources_cfg.items():
+        raw_source_dir = Path(str(source_cfg.get("raw_data_dir", raw_dir)))
+        processed_source_dir = Path(str(source_cfg.get("processed_data_dir", processed_dir)))
+
+        if not raw_source_dir.is_absolute():
+            raw_source_dir = (project_root / raw_source_dir).resolve()
+        if not processed_source_dir.is_absolute():
+            processed_source_dir = (project_root / processed_source_dir).resolve()
+
+        sources[source_name] = DataSource(
+            name=source_name,
+            raw_data_dir=raw_source_dir,
+            processed_data_dir=processed_source_dir,
+            raw_file_pattern=str(source_cfg.get("raw_file_pattern", csv_cfg.get("file_pattern", "{symbol}.csv"))).replace("{symbol}", "{ticker}"),
+            poc_file_pattern=str(source_cfg.get("poc_file_pattern", "{ticker}_poc.csv")),
+        )
+
+    if default_source not in sources:
+        default_source = "project_default"
+
+    return sources, default_source
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def list_tickers(processed_dir: str, poc_file_pattern: str) -> list[str]:
+    base = Path(processed_dir)
+    if not base.exists():
+        return []
+
+    suffix = poc_file_pattern.replace("{ticker}", "")
+    prefix = poc_file_pattern.split("{ticker}")[0] if "{ticker}" in poc_file_pattern else ""
+
+    tickers: list[str] = []
+    for file_path in sorted(base.glob("*.csv")):
+        name = file_path.name
+        if prefix and not name.startswith(prefix):
+            continue
+        if suffix and not name.endswith(suffix):
+            continue
+        ticker = name[len(prefix): len(name) - len(suffix) if suffix else None]
+        if ticker:
+            tickers.append(ticker.upper())
+    return sorted(set(tickers))
+
+
+def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for col in df.columns:
+        key = str(col).strip().lower()
+        if key == "datetime":
+            rename_map[col] = "Date"
+        elif key == "date":
+            rename_map[col] = "Date"
+        elif key in {"open", "high", "low", "close", "volume"}:
+            rename_map[col] = key.capitalize()
+    df = df.rename(columns=rename_map)
+    missing = [col for col in STANDARD_OHLCV if col not in df.columns]
+    if missing:
+        raise ValueError(f"OHLCV soubor nemá očekávané sloupce: {missing}")
+    out = df[STANDARD_OHLCV].copy()
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out = out.dropna(subset=STANDARD_OHLCV).sort_values("Date").reset_index(drop=True)
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_ohlcv_from_csv(raw_file_path: str) -> pd.DataFrame:
+    path = Path(raw_file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Raw data soubor nebyl nalezen: {path}")
+    df = pd.read_csv(path)
+    return normalize_ohlcv(df)
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_poc_data(poc_file_path: str) -> pd.DataFrame:
+    path = Path(poc_file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"POC soubor nebyl nalezen: {path}")
 
     df = pd.read_csv(path, parse_dates=["PeriodStart", "PeriodEnd"])
     required = {
@@ -82,42 +161,31 @@ def load_poc_data(csv_path: str) -> pd.DataFrame:
     }
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"CSV nemá očekávané sloupce: {sorted(missing)}")
+        raise ValueError(f"POC CSV nemá očekávané sloupce: {sorted(missing)}")
 
     df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
     df["PeriodType"] = df["PeriodType"].astype(str).str.lower().str.strip()
     df["POC"] = pd.to_numeric(df["POC"], errors="coerce")
-    df = df.dropna(subset=["Ticker", "PeriodType", "POC", "PeriodStart", "PeriodEnd"]).copy()
-    return df.sort_values(["Ticker", "PeriodStart", "PeriodType"]).reset_index(drop=True)
+    return df.dropna(subset=["Ticker", "PeriodType", "POC", "PeriodStart", "PeriodEnd"]).copy()
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_ohlcv(ticker: str, start: str) -> pd.DataFrame:
-    raw = yf.download(ticker, start=start, auto_adjust=True, progress=False)
-    if raw.empty:
-        return raw
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-    raw.index = pd.to_datetime(raw.index)
-    return raw[["Open", "High", "Low", "Close", "Volume"]].dropna()
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=60)
 def enrich_levels(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
     if levels.empty:
         return levels.copy()
 
     out = levels.copy()
-    last_close = float(ohlcv["Close"].iloc[-1])
+    ohlcv_idx = ohlcv.copy().set_index("Date")
+    last_close = float(ohlcv_idx["Close"].iloc[-1])
     out["LastPrice"] = last_close
-    out["SignedDist"] = (last_close - out["POC"]).round(4)  # + = cena nad levelem
+    out["SignedDist"] = (last_close - out["POC"]).round(4)
     out["AbsDist"] = out["SignedDist"].abs().round(4)
 
     touched_values: list[bool] = []
     touch_dates: list[pd.Timestamp | pd.NaT] = []
 
     for _, row in out.iterrows():
-        after_end = ohlcv[ohlcv.index > pd.Timestamp(row["PeriodEnd"])]
+        after_end = ohlcv_idx[ohlcv_idx.index > pd.Timestamp(row["PeriodEnd"])]
         touched_mask = (after_end["Low"] <= row["POC"]) & (after_end["High"] >= row["POC"])
         if touched_mask.any():
             first_touch = after_end.index[touched_mask][0]
@@ -132,8 +200,7 @@ def enrich_levels(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
     out["TouchDate"] = touch_dates
     out["AgeDays"] = (pd.Timestamp.today().normalize() - out["PeriodEnd"]).dt.days
     out["PeriodRank"] = out["PeriodType"].map(lambda x: PERIOD_STYLES.get(x, {}).get("rank", 99))
-    out = out.sort_values(["AbsDist", "PeriodRank", "PeriodStart"], ascending=[True, True, False]).reset_index(drop=True)
-    return out
+    return out.sort_values(["AbsDist", "PeriodRank", "PeriodStart"], ascending=[True, True, False]).reset_index(drop=True)
 
 
 def filter_levels(levels: pd.DataFrame, settings: ChartSettings) -> pd.DataFrame:
@@ -148,14 +215,14 @@ def filter_levels(levels: pd.DataFrame, settings: ChartSettings) -> pd.DataFrame
     return data.sort_values(["PeriodRank", "AbsDist", "PeriodStart"], ascending=[True, True, False]).reset_index(drop=True)
 
 
-
 def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
+    ohlcv_idx = ohlcv.copy().set_index("Date")
     fig = go.Figure()
 
-    history_start = ohlcv.index.max() - pd.DateOffset(months=settings.months_back)
-    chart_df = ohlcv[ohlcv.index >= history_start].copy()
+    history_start = ohlcv_idx.index.max() - pd.DateOffset(months=settings.months_back)
+    chart_df = ohlcv_idx[ohlcv_idx.index >= history_start].copy()
     if chart_df.empty:
-        chart_df = ohlcv.copy()
+        chart_df = ohlcv_idx.copy()
 
     fig.add_trace(go.Candlestick(
         x=chart_df.index,
@@ -171,7 +238,6 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
     ))
 
     legend_done: set[str] = set()
-
     for _, row in levels.iterrows():
         style = PERIOD_STYLES[row["PeriodType"]]
         x0 = pd.Timestamp(row["PeriodStart"]) if settings.extend_from_period_start else pd.Timestamp(row["PeriodEnd"])
@@ -216,15 +282,8 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
             )
 
     last_close = float(chart_df["Close"].iloc[-1])
-    fig.add_hline(
-        y=last_close,
-        line_width=1,
-        line_dash="solid",
-        line_color="#E5E7EB",
-        opacity=0.45,
-        annotation_text=f"Last {last_close:.2f}",
-        annotation_position="top left",
-    )
+    fig.add_hline(y=last_close, line_width=1, line_dash="solid", line_color="#E5E7EB", opacity=0.45,
+                  annotation_text=f"Last {last_close:.2f}", annotation_position="top left")
 
     fig.update_layout(
         title=dict(text=f"<b>{ticker}</b> – POC dashboard", x=0.02),
@@ -235,22 +294,11 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
         margin=dict(l=20, r=140 if settings.show_labels else 30, t=70, b=30),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
-        xaxis=dict(
-            rangeslider=dict(visible=False),
-            showgrid=True,
-            gridcolor="rgba(148,163,184,0.10)",
-            rangebreaks=[dict(bounds=["sat", "mon"])],
-        ),
-        yaxis=dict(
-            title="Cena",
-            side="right",
-            showgrid=True,
-            gridcolor="rgba(148,163,184,0.10)",
-            zeroline=False,
-        ),
+        xaxis=dict(rangeslider=dict(visible=False), showgrid=True, gridcolor="rgba(148,163,184,0.10)",
+                   rangebreaks=[dict(bounds=["sat", "mon"])]),
+        yaxis=dict(title="Cena", side="right", showgrid=True, gridcolor="rgba(148,163,184,0.10)", zeroline=False),
     )
     return fig
-
 
 
 def format_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -260,22 +308,14 @@ def format_table(df: pd.DataFrame) -> pd.DataFrame:
         "PeriodType", "Period", "POC", "LastPrice", "SignedDist", "AbsDist",
         "Valid", "Touched", "TouchDate", "PeriodStart", "PeriodEnd", "POC_Volume"
     ]].copy()
-    table = table.rename(columns={
+    return table.rename(columns={
         "PeriodType": "Type",
-        "Period": "Period",
-        "POC": "POC",
         "LastPrice": "Last",
         "SignedDist": "Dist",
-        "AbsDist": "AbsDist",
-        "Valid": "Valid",
-        "Touched": "Touched",
-        "TouchDate": "TouchDate",
+        "POC_Volume": "POC_Vol",
         "PeriodStart": "Start",
         "PeriodEnd": "End",
-        "POC_Volume": "POC_Vol",
     })
-    return table
-
 
 
 def metric_block(levels: pd.DataFrame) -> tuple[int, int, float | None]:
@@ -285,22 +325,22 @@ def metric_block(levels: pd.DataFrame) -> tuple[int, int, float | None]:
     return total, valid, nearest
 
 
+def resolve_source_files(source: DataSource, ticker: str) -> tuple[Path, Path]:
+    raw_path = source.raw_data_dir / source.raw_file_pattern.format(ticker=ticker)
+    poc_path = source.processed_data_dir / source.poc_file_pattern.format(ticker=ticker)
+    return raw_path, poc_path
 
-def sidebar_controls(all_tickers: Iterable[str]) -> tuple[str, str, ChartSettings]:
+
+def sidebar_controls(sources: dict[str, DataSource], default_source: str, tickers: Iterable[str]) -> tuple[str, str, ChartSettings]:
     st.sidebar.header("Nastavení")
-    csv_path = st.sidebar.text_input("CSV soubor", value=DEFAULT_POC_FILE)
-    ticker = st.sidebar.selectbox("Ticker", options=list(all_tickers))
+    source_name = st.sidebar.selectbox("Zdroj dat", options=list(sources.keys()), index=list(sources.keys()).index(default_source))
+    ticker = st.sidebar.selectbox("Ticker", options=list(tickers))
 
-    selected_periods = st.sidebar.multiselect(
-        "Zobrazit periody",
-        options=["weekly", "monthly", "yearly"],
-        default=["monthly", "yearly"],
-    )
-
+    selected_periods = st.sidebar.multiselect("Zobrazit periody", ["weekly", "monthly", "yearly"], default=["monthly", "yearly"])
     show_only_untouched = st.sidebar.checkbox("Pouze validní / dosud netestované levely", value=False)
     nearest_only = st.sidebar.checkbox("Zobrazit jen nejbližší levely", value=True)
-    nearest_count = st.sidebar.slider("Počet nejbližších levelů", min_value=1, max_value=12, value=6)
-    months_back = st.sidebar.slider("Kolik měsíců historie v grafu", min_value=3, max_value=36, value=12)
+    nearest_count = st.sidebar.slider("Počet nejbližších levelů", 1, 12, 6)
+    months_back = st.sidebar.slider("Kolik měsíců historie v grafu", 3, 36, 12)
     show_labels = st.sidebar.checkbox("Popisky levelů vpravo", value=True)
     extend_from_period_start = st.sidebar.checkbox("Vést čáru od začátku periody", value=False)
 
@@ -313,42 +353,53 @@ def sidebar_controls(all_tickers: Iterable[str]) -> tuple[str, str, ChartSetting
         months_back=months_back,
         extend_from_period_start=extend_from_period_start,
     )
-    return csv_path, ticker, settings
-
+    return source_name, ticker, settings
 
 
 def main() -> None:
     st.set_page_config(page_title="POC Dashboard", layout="wide")
     st.title("POC Dashboard")
-    st.caption("Přehledné zobrazení Point of Control levelů s filtry a rychlým přepínáním.")
+    st.caption("Čte lokální raw a processed data projektu. Žádné dvojí stahování cen.")
 
-    default_path = Path(DEFAULT_POC_FILE)
-    try:
-        poc_data = load_poc_data(str(default_path))
-    except Exception as exc:
-        st.error(f"Nepodařilo se načíst výchozí CSV: {exc}")
-        st.stop()
-
-    csv_path, ticker, settings = sidebar_controls(sorted(poc_data["Ticker"].unique().tolist()))
+    default_settings_path = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
+    settings_path = Path(st.sidebar.text_input("Settings YAML", value=str(default_settings_path)))
 
     try:
-        poc_data = load_poc_data(csv_path)
+        settings = load_yaml_settings(str(settings_path))
+        project_root = discover_project_root(settings_path)
+        sources, default_source = build_sources(settings, project_root)
     except Exception as exc:
-        st.error(f"Nepodařilo se načíst CSV: {exc}")
+        st.error(f"Nepodařilo se načíst YAML konfiguraci: {exc}")
         st.stop()
 
-    ticker_levels = poc_data[poc_data["Ticker"] == ticker].copy()
-    if ticker_levels.empty:
-        st.warning(f"Pro ticker {ticker} nejsou v CSV žádné levely.")
+    tickers = list_tickers(str(sources[default_source].processed_data_dir), sources[default_source].poc_file_pattern)
+    if not tickers:
+        st.error(f"V processed složce nejsou nalezené žádné *_poc.csv soubory: {sources[default_source].processed_data_dir}")
         st.stop()
 
-    ohlcv = load_ohlcv(ticker, DEFAULT_HISTORY_START)
-    if ohlcv.empty:
-        st.error(f"Nepodařilo se stáhnout cenová data pro {ticker}.")
+    source_name, ticker, chart_settings = sidebar_controls(sources, default_source, tickers)
+    source = sources[source_name]
+    raw_path, poc_path = resolve_source_files(source, ticker)
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption(f"Raw: `{raw_path}`")
+    st.sidebar.caption(f"POC: `{poc_path}`")
+
+    try:
+        ohlcv = load_ohlcv_from_csv(str(raw_path))
+    except Exception as exc:
+        st.error(f"Nepodařilo se načíst raw data pro {ticker}: {exc}")
         st.stop()
 
+    try:
+        poc_levels = load_poc_data(str(poc_path))
+    except Exception as exc:
+        st.error(f"Nepodařilo se načíst POC data pro {ticker}: {exc}")
+        st.stop()
+
+    ticker_levels = poc_levels[poc_levels["Ticker"] == ticker].copy()
     enriched = enrich_levels(ticker_levels, ohlcv)
-    filtered = filter_levels(enriched, settings)
+    filtered = filter_levels(enriched, chart_settings)
 
     total, valid_count, nearest_dist = metric_block(filtered)
     c1, c2, c3 = st.columns(3)
@@ -356,20 +407,19 @@ def main() -> None:
     c2.metric("Validní levely", valid_count)
     c3.metric("Nejbližší distance", "—" if nearest_dist is None else f"{nearest_dist:+.2f}")
 
-    if not settings.selected_periods:
+    if not chart_settings.selected_periods:
         st.info("Vyber alespoň jednu periodu v levém panelu.")
         st.stop()
-
     if filtered.empty:
         st.warning("Po zvolených filtrech nezůstal žádný level.")
         st.stop()
 
-    chart = build_chart(ohlcv, filtered, ticker, settings)
-    st.plotly_chart(chart, use_container_width=True)
+    st.plotly_chart(build_chart(ohlcv, filtered, ticker, chart_settings), use_container_width=True)
 
     st.subheader("Tabulka levelů")
+    table = format_table(filtered)
     st.dataframe(
-        format_table(filtered),
+        table,
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -384,18 +434,16 @@ def main() -> None:
         },
     )
 
-    csv_export = format_table(filtered).to_csv(index=False).encode("utf-8")
     st.download_button(
         "Stáhnout aktuálně filtrovanou tabulku",
-        data=csv_export,
+        data=table.to_csv(index=False).encode("utf-8"),
         file_name=f"{ticker}_poc_levels_filtered.csv",
         mime="text/csv",
     )
 
     with st.expander("Jak číst distance"):
         st.write(
-            "Distance je počítaná jako poslední cena mínus POC. "
-            "Kladná hodnota znamená, že aktuální cena je nad levelem. "
+            "Distance je počítaná jako poslední cena mínus POC. Kladná hodnota znamená, že aktuální cena je nad levelem. "
             "Záporná hodnota znamená, že cena je pod levelem."
         )
 
