@@ -38,9 +38,15 @@ import yfinance as yf
 # NASTAVENÍ
 # ============================================================
 
-POC_FILE = "poc_output.csv"
-OUTPUT_FILE = "poc_levels_enriched.csv"
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+
+RAW_DIR = PROJECT_DIR / "data" / "raw"
+PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
+OUTPUT_FILE = PROCESSED_DIR / "poc_levels_enriched.csv"
+
 START = "2020-01-01"
+
 
 # První jednoduchá mechanická definice testu levelu:
 # 1) cena se přiblíží k levelu v rámci TOUCH_BUFFER_ATR * ATR
@@ -56,7 +62,7 @@ EMA_SLOW = 200
 
 # Pokud chceš lokální CSV pro OHLCV, dej sem složku a očekávej soubory např. AAPL.csv
 # se sloupci Date, Open, High, Low, Close, Volume.
-LOCAL_OHLCV_DIR: Optional[str] = None
+LOCAL_OHLCV_DIR: Optional[str] = str(RAW_DIR)
 
 # ============================================================
 
