@@ -53,7 +53,7 @@ poc:
     summary_csv_path: "data/processed/poc_nearest_summary.csv"
 
 dashboard:
-  auto_open: false
+  auto_open: true
   default_data_source: "project_default"
   data_sources:
     project_default:
