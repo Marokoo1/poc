@@ -429,20 +429,25 @@ def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
     df["score_bucket"] = pd.cut(df["score"], bins=score_bins, labels=score_labels)
 
     summary = (
-        df.groupby(["period_type", "side", "trend_aligned", "score_bucket"], dropna=False)
-        .agg(
-            trades=("ticker", "count"),
-            win_rate=("win", "mean"),
-            avg_pnl_abs=("pnl_abs", "mean"),
-            median_pnl_abs=("pnl_abs", "median"),
-            avg_pnl_atr=("pnl_atr", "mean"),
-            avg_return_pct=("return_pct", "mean"),
-            median_return_pct=("return_pct", "median"),
-            avg_mfe=("mfe_abs", "mean"),
-            avg_mae=("mae_abs", "mean"),
-            avg_bars_held=("bars_held", "mean"),
-        )
-        .reset_index()
+    df.groupby(
+        ["period_type", "side", "trend_aligned", "score_bucket"],
+        dropna=False,
+        observed=False,
+    )
+    .agg(
+        trades=("ticker", "count"),
+        win_rate=("win", "mean"),
+        avg_pnl_abs=("pnl_abs", "mean"),
+        median_pnl_abs=("pnl_abs", "median"),
+        avg_pnl_atr=("pnl_atr", "mean"),
+        avg_return_pct=("return_pct", "mean"),
+        median_return_pct=("return_pct", "median"),
+        avg_mfe=("mfe_abs", "mean"),
+        avg_mae=("mae_abs", "mean"),
+        avg_bars_held=("bars_held", "mean"),
+    )
+    .reset_index()
+)
     )
 
     summary["win_rate"] = (summary["win_rate"] * 100).round(2)
