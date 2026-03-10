@@ -447,7 +447,7 @@ def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
         avg_bars_held=("bars_held", "mean"),
     )
     .reset_index()
-)
+
     )
 
     summary["win_rate"] = (summary["win_rate"] * 100).round(2)
