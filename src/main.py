@@ -1,55 +1,231 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
-import numpy as np
 import pandas as pd
-import yfinance as yf
+import yaml
 
-# ============================================================
-# NASTAVENÍ
-# ============================================================
+from data_fetcher import fetch_from_ib, fetch_yahoo_data, load_csv_data
+from poc_calculator import (
+    calculate_period_poc,
+    enrich_poc_with_level_status,
+    filter_complete_periods,
+)
+
+
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
-
-RAW_DIR = PROJECT_DIR / "data" / "raw"
-PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
-OUTPUT_FILE = PROCESSED_DIR / "poc_levels_enriched.csv"
-
-START = "2020-01-01"
-ATR_PERIOD = 14
-TOUCH_BUFFER_ATR = 0.15
-REACTION_ATR = 0.50
-LOOKAHEAD_BARS = 3
-EMA_FAST = 50
-EMA_SLOW = 200
-LOCAL_OHLCV_DIR: Optional[str] = str(RAW_DIR)
-# ============================================================
+CONFIG_PATH = PROJECT_DIR / "config" / "settings.yaml"
 
 
-@dataclass
-class LevelTestResult:
-    is_tested: bool
-    first_test_date: Optional[pd.Timestamp]
-    touch_date: Optional[pd.Timestamp]
-    reaction_size_abs: Optional[float]
-    reaction_size_atr: Optional[float]
+def load_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Config nenalezen: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+
+    return config
 
 
-def load_all_poc_levels(processed_dir: Path) -> pd.DataFrame:
-    files = sorted(processed_dir.glob("*_poc.csv"))
-    if not files:
-        raise FileNotFoundError(
-            f"V {processed_dir} nebyly nalezeny žádné soubory *_poc.csv"
+def ensure_directory(path_str: str) -> Path:
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def normalize_symbol_list(values: list[Any]) -> list[str]:
+    symbols: list[str] = []
+
+    for item in values:
+        symbol = str(item).strip().upper()
+        if symbol:
+            symbols.append(symbol)
+
+    return sorted(set(symbols))
+
+
+def load_symbols_from_manual(cfg: dict[str, Any]) -> list[str]:
+    symbols = cfg.get("symbols", [])
+    if not isinstance(symbols, list):
+        raise ValueError("universe.manual.symbols musí být seznam tickerů.")
+    return normalize_symbol_list(symbols)
+
+
+def load_symbols_from_txt(cfg: dict[str, Any]) -> list[str]:
+    path_str = cfg.get("path")
+    if not path_str:
+        raise ValueError("universe.txt_list.path není nastaven.")
+
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+
+    if not path.exists():
+        raise FileNotFoundError(f"TXT watchlist nenalezen: {path}")
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    symbols = [line.strip() for line in lines if line.strip()]
+    return normalize_symbol_list(symbols)
+
+
+def load_symbols_from_csv(cfg: dict[str, Any]) -> list[str]:
+    path_str = cfg.get("path")
+    column = cfg.get("column", "Symbol")
+
+    if not path_str:
+        raise ValueError("universe.csv_list.path není nastaven.")
+
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+
+    if not path.exists():
+        raise FileNotFoundError(f"CSV watchlist nenalezen: {path}")
+
+    df = pd.read_csv(path)
+    if column not in df.columns:
+        raise ValueError(
+            f"CSV watchlist nemá sloupec '{column}'. Dostupné sloupce: {list(df.columns)}"
         )
 
-    frames = []
-    for path in files:
-        df = pd.read_csv(path)
-        required = {
+    symbols = df[column].dropna().astype(str).tolist()
+    return normalize_symbol_list(symbols)
+
+
+def load_symbols_from_tls(cfg: dict[str, Any]) -> list[str]:
+    path_str = cfg.get("path")
+    if not path_str:
+        raise ValueError("universe.tls.path není nastaven.")
+
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+
+    if not path.exists():
+        raise FileNotFoundError(f"TLS watchlist nenalezen: {path}")
+
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    symbols: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+
+        # jednoduchý a odolný parser: vezmi první token/sloupec
+        token = line.split(",")[0].split(";")[0].strip()
+        if token:
+            symbols.append(token)
+
+    return normalize_symbol_list(symbols)
+
+
+def load_symbols(config: dict[str, Any]) -> list[str]:
+    universe = config.get("universe", {})
+    mode = universe.get("mode", "manual")
+
+    if mode == "manual":
+        return load_symbols_from_manual(universe.get("manual", {}))
+    if mode == "txt_list":
+        return load_symbols_from_txt(universe.get("txt_list", {}))
+    if mode == "csv_list":
+        return load_symbols_from_csv(universe.get("csv_list", {}))
+    if mode == "tls":
+        return load_symbols_from_tls(universe.get("tls", {}))
+
+    raise ValueError(f"Neznámý universe.mode: {mode}")
+
+
+def fetch_ohlcv_for_symbol(
+    symbol: str,
+    data_source_mode: str,
+    config: dict[str, Any],
+    raw_data_dir: str,
+) -> pd.DataFrame:
+    if data_source_mode == "yahoo":
+        return fetch_yahoo_data(symbol, config.get("yahoo", {}), raw_data_dir)
+
+    if data_source_mode == "csv":
+        csv_cfg = config.get("csv", {})
+        file_pattern = csv_cfg.get("file_pattern", "{symbol}.csv")
+        return load_csv_data(symbol, raw_data_dir, file_pattern=file_pattern)
+
+    if data_source_mode == "ib":
+        return fetch_from_ib(symbol, config.get("ib", {}))
+
+    raise ValueError(f"Neznámý data_source.mode: {data_source_mode}")
+
+
+def apply_keep_last(df: pd.DataFrame, keep_last: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    if keep_last <= 0:
+        return pd.DataFrame(columns=df.columns)
+
+    return df.tail(keep_last).reset_index(drop=True)
+
+
+def maybe_enrich_level_status(
+    poc_df: pd.DataFrame,
+    price_df: pd.DataFrame,
+    config: dict[str, Any],
+) -> pd.DataFrame:
+    level_status_cfg = config.get("poc", {}).get("level_status", {})
+    enabled = bool(level_status_cfg.get("enabled", True))
+
+    if not enabled:
+        return poc_df
+
+    track_touch = bool(level_status_cfg.get("track_touch", True))
+    track_cross = bool(level_status_cfg.get("track_cross", True))
+
+    return enrich_poc_with_level_status(
+        poc_df=poc_df,
+        price_df=price_df,
+        track_touch=track_touch,
+        track_cross=track_cross,
+    )
+
+
+def build_poc_for_symbol(symbol: str, price_df: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
+    poc_cfg = config.get("poc", {})
+    periods_cfg = poc_cfg.get("periods", {})
+    keep_last_cfg = poc_cfg.get("keep_last", {})
+
+    period_plan = [
+        ("weekly", bool(periods_cfg.get("weekly", True)), int(keep_last_cfg.get("weekly", 5))),
+        ("monthly", bool(periods_cfg.get("monthly", True)), int(keep_last_cfg.get("monthly", 5))),
+        ("yearly", bool(periods_cfg.get("yearly", True)), int(keep_last_cfg.get("yearly", 3))),
+    ]
+
+    frames: list[pd.DataFrame] = []
+
+    for period_name, enabled, keep_last_n in period_plan:
+        if not enabled:
+            continue
+
+        period_df = calculate_period_poc(price_df, period=period_name)
+        if period_df.empty:
+            print(f"[WARN] {symbol}: žádná POC data pro {period_name}")
+            continue
+
+        period_df = filter_complete_periods(period_df, period=period_name)
+        period_df = apply_keep_last(period_df, keep_last=keep_last_n)
+        period_df = maybe_enrich_level_status(period_df, price_df, config)
+
+        if period_df.empty:
+            print(f"[WARN] {symbol}: po filtraci nezůstala žádná data pro {period_name}")
+            continue
+
+        period_df["Ticker"] = symbol
+        period_df["PeriodType"] = period_name
+
+        ordered_cols = [
             "Ticker",
             "PeriodType",
             "Period",
@@ -60,314 +236,76 @@ def load_all_poc_levels(processed_dir: Path) -> pd.DataFrame:
             "Period_High",
             "Period_Low",
             "Period_Close",
-        }
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"{path.name} nemá očekávané sloupce: {sorted(missing)}")
-        frames.append(df)
+        ]
 
-    out = pd.concat(frames, ignore_index=True)
-    out["PeriodStart"] = pd.to_datetime(out["PeriodStart"])
-    out["PeriodEnd"] = pd.to_datetime(out["PeriodEnd"])
-    return out
+        extra_cols = [col for col in period_df.columns if col not in ordered_cols]
+        period_df = period_df[ordered_cols + extra_cols]
 
+        frames.append(period_df)
 
-def load_ohlcv(ticker: str, start: str) -> pd.DataFrame:
-    if LOCAL_OHLCV_DIR:
-        local_path = Path(LOCAL_OHLCV_DIR) / f"{ticker}.csv"
-        if local_path.exists():
-            df = pd.read_csv(local_path, parse_dates=["Date"])
-            df = df.set_index("Date").sort_index()
-            required = {"Open", "High", "Low", "Close", "Volume"}
-            missing = required - set(df.columns)
-            if missing:
-                raise ValueError(f"{local_path} nemá požadované sloupce: {sorted(missing)}")
-            return df[["Open", "High", "Low", "Close", "Volume"]].copy()
-
-    raw = yf.download(
-        ticker,
-        start=start,
-        end=date.today().strftime("%Y-%m-%d"),
-        auto_adjust=True,
-        progress=False,
-    )
-    if raw.empty:
+    if not frames:
         return pd.DataFrame()
 
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-
-    return raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.sort_values(["PeriodType", "PeriodStart"]).reset_index(drop=True)
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    prev_close = out["Close"].shift(1)
-    tr_components = pd.concat(
-        [
-            out["High"] - out["Low"],
-            (out["High"] - prev_close).abs(),
-            (out["Low"] - prev_close).abs(),
-        ],
-        axis=1,
-    )
-    out["TR"] = tr_components.max(axis=1)
-    out["ATR"] = out["TR"].rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
-    out["EMA50"] = out["Close"].ewm(span=EMA_FAST, adjust=False).mean()
-    out["EMA200"] = out["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
-    return out
-
-
-def next_trading_day(index: pd.DatetimeIndex, dt: pd.Timestamp) -> Optional[pd.Timestamp]:
-    valid = index[index > dt]
-    return valid[0] if len(valid) else None
-
-
-def classify_side(last_close: float, level: float) -> str:
-    if pd.isna(last_close) or pd.isna(level):
-        return "unknown"
-    if last_close > level:
-        return "long"
-    if last_close < level:
-        return "short"
-    return "at_level"
-
-
-def assess_trend(last_row: pd.Series) -> str:
-    close = float(last_row["Close"])
-    ema50 = float(last_row["EMA50"])
-    ema200 = float(last_row["EMA200"])
-    if close > ema50 > ema200:
-        return "up"
-    if close < ema50 < ema200:
-        return "down"
-    return "neutral"
-
-
-def scan_level_test(
-    ohlcv: pd.DataFrame,
-    level: float,
-    level_side: str,
-    active_from: pd.Timestamp,
-) -> LevelTestResult:
-    df = ohlcv.loc[ohlcv.index >= active_from].copy()
-    if df.empty:
-        return LevelTestResult(False, None, None, None, None)
-
-    for i in range(len(df)):
-        row = df.iloc[i]
-        atr = row["ATR"]
-        if pd.isna(atr) or atr <= 0:
-            continue
-
-        buffer_abs = TOUCH_BUFFER_ATR * atr
-        reaction_threshold_abs = REACTION_ATR * atr
-        touch_date = df.index[i]
-
-        if level_side == "long":
-            touched = float(row["Low"]) <= level + buffer_abs
-            if not touched:
-                continue
-            window = df.iloc[i : i + LOOKAHEAD_BARS + 1]
-            max_high = float(window["High"].max())
-            reaction_abs = max_high - level
-            if reaction_abs >= reaction_threshold_abs:
-                return LevelTestResult(
-                    True,
-                    touch_date,
-                    touch_date,
-                    round(reaction_abs, 6),
-                    round(reaction_abs / atr, 6),
-                )
-
-        elif level_side == "short":
-            touched = float(row["High"]) >= level - buffer_abs
-            if not touched:
-                continue
-            window = df.iloc[i : i + LOOKAHEAD_BARS + 1]
-            min_low = float(window["Low"].min())
-            reaction_abs = level - min_low
-            if reaction_abs >= reaction_threshold_abs:
-                return LevelTestResult(
-                    True,
-                    touch_date,
-                    touch_date,
-                    round(reaction_abs, 6),
-                    round(reaction_abs / atr, 6),
-                )
-
-    return LevelTestResult(False, None, None, None, None)
-
-
-def compute_score(
-    level_side: str,
-    is_tested: bool,
-    trend: str,
-    distance_atr: Optional[float],
-    period_type: str,
-) -> int:
-    score = 0
-
-    if not is_tested:
-        score += 40
-
-    if level_side == "long" and trend == "up":
-        score += 20
-    elif level_side == "short" and trend == "down":
-        score += 20
-    elif trend == "neutral":
-        score += 5
-
-    period_bonus = {
-        "weekly": 5,
-        "monthly": 15,
-        "yearly": 25,
-    }
-    score += period_bonus.get(str(period_type).lower(), 0)
-
-    if distance_atr is not None and not pd.isna(distance_atr):
-        abs_dist = abs(float(distance_atr))
-        if 0.25 <= abs_dist <= 1.50:
-            score += 15
-        elif 1.50 < abs_dist <= 3.00:
-            score += 8
-        elif abs_dist < 0.25:
-            score += 3
-
-    return int(min(score, 100))
-
-
-def enrich_levels_for_ticker(ticker: str, levels_df: pd.DataFrame) -> pd.DataFrame:
-    ohlcv = load_ohlcv(ticker, START)
-    if ohlcv.empty:
-        print(f"  ⚠️  Žádná OHLCV data pro {ticker}, přeskakuji enrichment.")
-        return pd.DataFrame()
-
-    ohlcv = add_indicators(ohlcv)
-    last_row = ohlcv.iloc[-1]
-    last_close = float(last_row["Close"])
-    last_atr = float(last_row["ATR"]) if not pd.isna(last_row["ATR"]) else np.nan
-    trend = assess_trend(last_row)
-
-    rows: list[dict] = []
-    for _, row in levels_df.sort_values(["PeriodType", "PeriodStart"]).iterrows():
-        level = float(row["POC"])
-        period_end = pd.Timestamp(row["PeriodEnd"])
-        active_from = next_trading_day(ohlcv.index, period_end)
-
-        level_side = classify_side(last_close, level)
-
-        if active_from is None:
-            test_result = LevelTestResult(False, None, None, None, None)
-            days_untested = np.nan
-        else:
-            test_result = scan_level_test(ohlcv, level, level_side, active_from)
-            if test_result.is_tested and test_result.first_test_date is not None:
-                days_untested = (test_result.first_test_date.normalize() - active_from.normalize()).days
-            else:
-                days_untested = (ohlcv.index[-1].normalize() - active_from.normalize()).days
-
-        distance_abs = last_close - level
-        distance_pct = (distance_abs / level * 100.0) if level else np.nan
-        distance_atr = (distance_abs / last_atr) if pd.notna(last_atr) and last_atr > 0 else np.nan
-
-        trend_alignment = (
-            (level_side == "long" and trend == "up")
-            or (level_side == "short" and trend == "down")
-        )
-
-        score = compute_score(
-            level_side=level_side,
-            is_tested=test_result.is_tested,
-            trend=trend,
-            distance_atr=distance_atr,
-            period_type=str(row["PeriodType"]),
-        )
-
-        enriched = row.to_dict()
-        enriched.update(
-            {
-                "LevelPrice": round(level, 4),
-                "LevelSide": level_side,
-                "ActiveFrom": active_from.date().isoformat() if active_from is not None else None,
-                "IsTested": bool(test_result.is_tested),
-                "FirstTestDate": test_result.first_test_date.date().isoformat()
-                if test_result.first_test_date is not None
-                else None,
-                "DaysUntested": days_untested,
-                "LastClose": round(last_close, 4),
-                "LastATR14": round(last_atr, 4) if not np.isnan(last_atr) else np.nan,
-                "DistanceToLastClose": round(distance_abs, 4),
-                "DistancePct": round(distance_pct, 4) if not pd.isna(distance_pct) else np.nan,
-                "DistanceATR": round(distance_atr, 4) if not pd.isna(distance_atr) else np.nan,
-                "TrendContext": trend,
-                "TrendAligned": bool(trend_alignment),
-                "ReactionSizeAbs": test_result.reaction_size_abs,
-                "ReactionSizeATR": test_result.reaction_size_atr,
-                "ValidNow": not bool(test_result.is_tested),
-                "Score": score,
-            }
-        )
-        rows.append(enriched)
-
-    return pd.DataFrame(rows)
+def save_poc_output(symbol: str, poc_df: pd.DataFrame, processed_dir: Path) -> Path:
+    output_path = processed_dir / f"{symbol}_poc.csv"
+    poc_df.to_csv(output_path, index=False)
+    return output_path
 
 
 def main() -> None:
-    try:
-        poc_df = load_all_poc_levels(PROCESSED_DIR)
-    except Exception as e:
-        print(f"❌ {e}")
-        return
+    config = load_config(CONFIG_PATH)
 
-    if poc_df.empty:
-        print("❌ Žádné POC levely k obohacení.")
-        return
+    paths_cfg = config.get("paths", {})
+    raw_dir = ensure_directory(paths_cfg.get("raw_data_dir", "data/raw"))
+    processed_dir = ensure_directory(paths_cfg.get("processed_data_dir", "data/processed"))
 
-    all_frames: list[pd.DataFrame] = []
-    tickers = sorted(poc_df["Ticker"].dropna().astype(str).unique().tolist())
+    symbols = load_symbols(config)
+    if not symbols:
+        raise ValueError("Nebyl načten žádný ticker z watchlistu.")
 
-    print(f"📂 Načteno {len(poc_df)} POC levelů")
-    print(f"📈 Tickery: {', '.join(tickers)}")
+    data_source_mode = config.get("data_source", {}).get("mode", "yahoo")
 
-    for ticker in tickers:
-        print(f"Zpracovávám {ticker}...")
-        ticker_levels = poc_df[poc_df["Ticker"] == ticker].copy()
-        enriched = enrich_levels_for_ticker(ticker, ticker_levels)
-        if not enriched.empty:
-            all_frames.append(enriched)
-            print(f"  ✅ Obohaceno {len(enriched)} levelů")
+    print(f"📂 Projekt: {config.get('project', {}).get('name', 'POC Project')}")
+    print(f"📈 Tickery: {', '.join(symbols)}")
+    print(f"🗂 Raw dir: {raw_dir}")
+    print(f"🗂 Processed dir: {processed_dir}")
+    print(f"🔌 Data source: {data_source_mode}")
+    print()
 
-    if not all_frames:
-        print("⚠️  Nic se nepodařilo zpracovat.")
-        return
+    ok_count = 0
 
-    final = pd.concat(all_frames, ignore_index=True)
-    sort_cols = [c for c in ["Ticker", "PeriodType", "PeriodEnd"] if c in final.columns]
-    if sort_cols:
-        ascending = [True, True, False][: len(sort_cols)]
-        final = final.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+    for symbol in symbols:
+        print(f"Zpracovávám {symbol}...")
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    final.to_csv(OUTPUT_FILE, index=False)
-    print(f"\n✅ Hotovo! Výstup uložen do: {OUTPUT_FILE}")
-    print(f"   Celkem řádků: {len(final)}")
-    print("\nUkázka:")
-    preview_cols = [
-        "Ticker",
-        "PeriodType",
-        "Period",
-        "POC",
-        "LevelSide",
-        "IsTested",
-        "FirstTestDate",
-        "LastClose",
-        "DistanceATR",
-        "TrendContext",
-        "Score",
-    ]
-    preview_cols = [c for c in preview_cols if c in final.columns]
-    print(final[preview_cols].head(10).to_string(index=False))
+        price_df = fetch_ohlcv_for_symbol(
+            symbol=symbol,
+            data_source_mode=data_source_mode,
+            config=config,
+            raw_data_dir=str(raw_dir),
+        )
+
+        if price_df.empty:
+            print(f"  ⚠️ Přeskakuji {symbol}: nepodařilo se načíst OHLCV data")
+            continue
+
+        poc_df = build_poc_for_symbol(symbol, price_df, config)
+        if poc_df.empty:
+            print(f"  ⚠️ Přeskakuji {symbol}: nepodařilo se vytvořit POC výstup")
+            continue
+
+        output_path = save_poc_output(symbol, poc_df, processed_dir)
+        print(f"  ✅ Uloženo {len(poc_df)} řádků do {output_path}")
+        ok_count += 1
+
+    print()
+    if ok_count == 0:
+        print("❌ Nepodařilo se vygenerovat žádné *_poc.csv soubory.")
+    else:
+        print(f"✅ Hotovo! Vygenerováno {ok_count} POC souborů.")
 
 
 if __name__ == "__main__":
