@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+
+RAW_DIR = PROJECT_DIR / "data" / "raw"
+PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
+
+TRADES_FILE = PROCESSED_DIR / "poc_backtest_trades.csv"
+SUMMARY_FILE = PROCESSED_DIR / "poc_backtest_summary.csv"
+
+OHLCV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_trades() -> pd.DataFrame:
+    if not TRADES_FILE.exists():
+        raise FileNotFoundError(f"Soubor neexistuje: {TRADES_FILE}")
+
+    df = pd.read_csv(TRADES_FILE)
+
+    date_cols = ["active_from", "touch_date", "entry_date", "exit_date"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_summary() -> pd.DataFrame:
+    if not SUMMARY_FILE.exists():
+        raise FileNotFoundError(f"Soubor neexistuje: {SUMMARY_FILE}")
+
+    return pd.read_csv(SUMMARY_FILE)
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_ohlcv(ticker: str) -> pd.DataFrame:
+    path = RAW_DIR / f"{ticker}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Raw data soubor neexistuje: {path}")
+
+    df = pd.read_csv(path)
+    missing = [c for c in OHLCV_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"{path.name} nemá požadované sloupce: {missing}")
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=OHLCV_COLUMNS).sort_values("Date").reset_index(drop=True)
+    return df
+
+
+def build_trade_chart(ohlcv: pd.DataFrame, trade: pd.Series, history_bars: int = 40) -> go.Figure:
+    entry_date = pd.Timestamp(trade["entry_date"]) if pd.notna(trade["entry_date"]) else None
+    exit_date = pd.Timestamp(trade["exit_date"]) if pd.notna(trade["exit_date"]) else None
+    touch_date = pd.Timestamp(trade["touch_date"]) if pd.notna(trade["touch_date"]) else None
+
+    if entry_date is None:
+        raise ValueError("Vybraný obchod nemá entry_date.")
+
+    entry_idx_list = ohlcv.index[ohlcv["Date"] == entry_date].tolist()
+    entry_idx = entry_idx_list[0] if entry_idx_list else max(0, len(ohlcv) - 100)
+
+    start_idx = max(0, entry_idx - history_bars)
+
+    if exit_date is not None:
+        exit_idx_list = ohlcv.index[ohlcv["Date"] == exit_date].tolist()
+        exit_idx = exit_idx_list[0] if exit_idx_list else min(len(ohlcv) - 1, entry_idx + 30)
+        end_idx = min(len(ohlcv) - 1, exit_idx + 20)
+    else:
+        end_idx = min(len(ohlcv) - 1, entry_idx + 30)
+
+    chart_df = ohlcv.iloc[start_idx : end_idx + 1].copy()
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Candlestick(
+            x=chart_df["Date"],
+            open=chart_df["Open"],
+            high=chart_df["High"],
+            low=chart_df["Low"],
+            close=chart_df["Close"],
+            name="Cena",
+            increasing_line_color="#22C55E",
+            decreasing_line_color="#EF4444",
+            whiskerwidth=0.35,
+            showlegend=False,
+        )
+    )
+
+    level_price = float(trade["level_price"])
+    entry_price = float(trade["entry_price"]) if pd.notna(trade["entry_price"]) else None
+    exit_price = float(trade["exit_price"]) if pd.notna(trade["exit_price"]) else None
+    stop_price = float(trade["stop_price"]) if pd.notna(trade["stop_price"]) else None
+    target_price = float(trade["target_price"]) if pd.notna(trade["target_price"]) else None
+
+    x_min = chart_df["Date"].min()
+    x_max = chart_df["Date"].max()
+
+    fig.add_trace(
+        go.Scatter(
+            x=[x_min, x_max],
+            y=[level_price, level_price],
+            mode="lines",
+            name="Level",
+            line=dict(color="#F59E0B", width=2, dash="dash"),
+            hovertemplate=f"Level: {level_price:.2f}<extra></extra>",
+        )
+    )
+
+    if stop_price is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[entry_date, x_max],
+                y=[stop_price, stop_price],
+                mode="lines",
+                name="Stop",
+                line=dict(color="#EF4444", width=1.5, dash="dot"),
+                hovertemplate=f"Stop: {stop_price:.2f}<extra></extra>",
+            )
+        )
+
+    if target_price is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[entry_date, x_max],
+                y=[target_price, target_price],
+                mode="lines",
+                name="Target",
+                line=dict(color="#22C55E", width=1.5, dash="dot"),
+                hovertemplate=f"Target: {target_price:.2f}<extra></extra>",
+            )
+        )
+
+    if touch_date is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[touch_date],
+                y=[level_price],
+                mode="markers",
+                name="Touch",
+                marker=dict(size=11, color="#F59E0B", symbol="diamond"),
+                hovertemplate=f"Touch: {touch_date.date()}<extra></extra>",
+            )
+        )
+
+    if entry_price is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[entry_date],
+                y=[entry_price],
+                mode="markers",
+                name="Entry",
+                marker=dict(size=12, color="#60A5FA", symbol="triangle-up"),
+                hovertemplate=f"Entry: {entry_price:.2f}<extra></extra>",
+            )
+        )
+
+    if exit_date is not None and exit_price is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[exit_date],
+                y=[exit_price],
+                mode="markers",
+                name="Exit",
+                marker=dict(size=12, color="#E5E7EB", symbol="x"),
+                hovertemplate=f"Exit: {exit_price:.2f}<extra></extra>",
+            )
+        )
+
+    title = (
+        f"{trade['ticker']} | {trade['period_type']} | {trade['period']} | "
+        f"{trade['side']} | {trade['exit_reason']}"
+    )
+
+    fig.update_layout(
+        title=title,
+        template="plotly_dark",
+        paper_bgcolor="#0B1220",
+        plot_bgcolor="#0B1220",
+        height=760,
+        margin=dict(l=20, r=20, t=60, b=20),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.10)",
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+        ),
+        yaxis=dict(
+            title="Cena",
+            side="right",
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.10)",
+            zeroline=False,
+        ),
+    )
+
+    return fig
+
+
+def build_overview_metrics(trades: pd.DataFrame) -> dict:
+    real = trades[trades["entry_date"].notna()].copy()
+    wins = real[real["pnl_abs"] > 0].copy()
+
+    total_levels = len(trades)
+    total_trades = len(real)
+    win_rate = (len(wins) / total_trades * 100) if total_trades else 0.0
+    avg_pnl_atr = real["pnl_atr"].mean() if "pnl_atr" in real.columns else float("nan")
+    avg_hold = real["bars_held"].mean() if "bars_held" in real.columns else float("nan")
+
+    return {
+        "total_levels": total_levels,
+        "total_trades": total_trades,
+        "win_rate": win_rate,
+        "avg_pnl_atr": avg_pnl_atr,
+        "avg_hold": avg_hold,
+    }
+
+
+def build_ticker_summary(trades: pd.DataFrame) -> pd.DataFrame:
+    real = trades[trades["entry_date"].notna()].copy()
+    if real.empty:
+        return pd.DataFrame()
+
+    real["win"] = real["pnl_abs"] > 0
+
+    out = (
+        real.groupby("ticker", observed=False)
+        .agg(
+            trades=("ticker", "count"),
+            win_rate=("win", "mean"),
+            avg_pnl_abs=("pnl_abs", "mean"),
+            avg_pnl_atr=("pnl_atr", "mean"),
+            avg_hold=("bars_held", "mean"),
+        )
+        .reset_index()
+        .sort_values(["avg_pnl_atr", "win_rate"], ascending=[False, False])
+    )
+
+    out["win_rate"] = (out["win_rate"] * 100).round(2)
+    return out
+
+
+def main() -> None:
+    st.set_page_config(page_title="POC Backtest Dashboard", layout="wide")
+    st.title("POC Backtest Dashboard")
+    st.caption("Přehled backtestu a vizualizace jednotlivých obchodů")
+
+    try:
+        trades = load_trades()
+        summary = load_summary()
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    metrics = build_overview_metrics(trades)
+    real_trades = trades[trades["entry_date"].notna()].copy()
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Levelů", f"{metrics['total_levels']:,}")
+    col2.metric("Obchodů", f"{metrics['total_trades']:,}")
+    col3.metric("Win rate", f"{metrics['win_rate']:.2f}%")
+    col4.metric("Avg PnL ATR", f"{metrics['avg_pnl_atr']:.3f}" if pd.notna(metrics["avg_pnl_atr"]) else "n/a")
+    col5.metric("Avg hold", f"{metrics['avg_hold']:.2f} d" if pd.notna(metrics["avg_hold"]) else "n/a")
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Summary", "Ticker summary", "Trades explorer", "Trade chart"]
+    )
+
+    with tab1:
+        st.subheader("Souhrn podle typu levelu")
+        st.dataframe(summary, width="stretch", hide_index=True)
+
+    with tab2:
+        st.subheader("Souhrn podle tickeru")
+        ticker_summary = build_ticker_summary(trades)
+        if ticker_summary.empty:
+            st.info("Zatím nejsou žádné obchody.")
+        else:
+            st.dataframe(ticker_summary, width="stretch", hide_index=True)
+
+    with tab3:
+        st.subheader("Filtrování obchodů")
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        tickers = ["ALL"] + sorted(real_trades["ticker"].dropna().unique().tolist())
+        period_types = ["ALL"] + sorted(real_trades["period_type"].dropna().unique().tolist())
+        sides = ["ALL"] + sorted(real_trades["side"].dropna().unique().tolist())
+        exit_reasons = ["ALL"] + sorted(real_trades["exit_reason"].dropna().unique().tolist())
+        trend_flags = ["ALL", "True", "False"]
+
+        selected_ticker = c1.selectbox("Ticker", tickers)
+        selected_period = c2.selectbox("Period type", period_types)
+        selected_side = c3.selectbox("Side", sides)
+        selected_exit = c4.selectbox("Exit reason", exit_reasons)
+        selected_trend = c5.selectbox("Trend aligned", trend_flags)
+
+        filtered = real_trades.copy()
+
+        if selected_ticker != "ALL":
+            filtered = filtered[filtered["ticker"] == selected_ticker]
+        if selected_period != "ALL":
+            filtered = filtered[filtered["period_type"] == selected_period]
+        if selected_side != "ALL":
+            filtered = filtered[filtered["side"] == selected_side]
+        if selected_exit != "ALL":
+            filtered = filtered[filtered["exit_reason"] == selected_exit]
+        if selected_trend != "ALL":
+            filtered = filtered[filtered["trend_aligned"].astype(str) == selected_trend]
+
+        filtered = filtered.sort_values(["entry_date", "ticker"], ascending=[False, True]).reset_index(drop=True)
+
+        st.write(f"Nalezeno obchodů: **{len(filtered)}**")
+        st.dataframe(filtered, width="stretch", hide_index=True)
+
+    with tab4:
+        st.subheader("Graf konkrétního obchodu")
+
+        if real_trades.empty:
+            st.info("Nejsou k dispozici žádné obchody s entry.")
+            return
+
+        trade_selector_df = real_trades.copy().sort_values(["entry_date", "ticker"], ascending=[False, True]).reset_index(drop=True)
+        trade_selector_df["label"] = (
+            trade_selector_df["ticker"].astype(str)
+            + " | "
+            + trade_selector_df["period_type"].astype(str)
+            + " | "
+            + trade_selector_df["period"].astype(str)
+            + " | "
+            + trade_selector_df["side"].astype(str)
+            + " | "
+            + trade_selector_df["entry_date"].dt.strftime("%Y-%m-%d")
+            + " | "
+            + trade_selector_df["exit_reason"].astype(str)
+            + " | pnl="
+            + trade_selector_df["pnl_abs"].round(2).astype(str)
+        )
+
+        selected_label = st.selectbox("Vyber obchod", trade_selector_df["label"].tolist())
+        selected_trade = trade_selector_df.loc[trade_selector_df["label"] == selected_label].iloc[0]
+
+        ticker = str(selected_trade["ticker"])
+        ohlcv = load_ohlcv(ticker)
+
+        st.plotly_chart(build_trade_chart(ohlcv, selected_trade), width="stretch")
+
+        info_cols = st.columns(6)
+        info_cols[0].metric("Ticker", ticker)
+        info_cols[1].metric("Period", str(selected_trade["period_type"]))
+        info_cols[2].metric("Side", str(selected_trade["side"]))
+        info_cols[3].metric("Exit", str(selected_trade["exit_reason"]))
+        info_cols[4].metric("PnL", f"{selected_trade['pnl_abs']:.2f}")
+        info_cols[5].metric("Hold", f"{selected_trade['bars_held']:.0f} d" if pd.notna(selected_trade["bars_held"]) else "n/a")
+
+        detail = pd.DataFrame([selected_trade.drop(labels=["label"])])
+        st.dataframe(detail, width="stretch", hide_index=True)
+
+
+if __name__ == "__main__":
+    main()
