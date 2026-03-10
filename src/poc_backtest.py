@@ -25,15 +25,15 @@ SUMMARY_FILE = PROCESSED_DIR / "poc_backtest_summary.csv"
 # ============================================================
 ATR_PERIOD = 14
 
-MIN_SCORE = 50
+MIN_SCORE = 0
 ONLY_UNTESTED = False
 ONLY_VALID_SIDES = True
 ONLY_TREND_ALIGNED = False
 
-ENTRY_BUFFER_ATR = 0.15
+ENTRY_BUFFER_ATR = 0.30
 STOP_ATR = 1.00
-TARGET_ATR = 1.50
-MAX_HOLD_BARS = 10
+TARGET_ATR = 1.00
+MAX_HOLD_BARS = 15
 
 AMBIGUOUS_EXIT = "ambiguous"
 
