@@ -29,14 +29,28 @@ EMA_FAST = 50
 EMA_SLOW = 200
 
 INCLUDE_PERIODS = ("weekly", "monthly", "yearly")
-ALLOW_OVERLAPPING_TRADES = True
+MIN_LEVEL_AGE_BARS = 1
 
 ENTRY_BUFFER_ATR = 0.30
-STOP_ATR = 1.00
-TARGET_ATR = 1.00
-MAX_HOLD_BARS = 15
 
-MIN_LEVEL_AGE_BARS = 1
+PERIOD_PARAMS = {
+    "weekly": {
+        "stop_atr": 1.0,
+        "target_atr": 1.0,
+        "max_hold_bars": 10,
+    },
+    "monthly": {
+        "stop_atr": 1.5,
+        "target_atr": 2.0,
+        "max_hold_bars": 20,
+    },
+    "yearly": {
+        "stop_atr": 2.0,
+        "target_atr": 3.0,
+        "max_hold_bars": 40,
+    },
+}
+
 AMBIGUOUS_EXIT = "ambiguous"
 
 # ============================================================
@@ -201,12 +215,23 @@ def compute_mfe_mae(window: pd.DataFrame, entry: float, side: str) -> tuple[floa
     return round(mfe, 6), round(mae, 6)
 
 
+def get_period_params(period_type: str) -> dict:
+    if period_type not in PERIOD_PARAMS:
+        raise ValueError(f"Neznámé PeriodType pro params: {period_type}")
+    return PERIOD_PARAMS[period_type]
+
+
 def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeResult:
     ticker = str(level_row["Ticker"])
     period_type = str(level_row["PeriodType"])
     period = str(level_row["Period"])
     level = float(level_row["POC"])
     active_from = pd.Timestamp(level_row["ActiveFrom"])
+
+    params = get_period_params(period_type)
+    stop_atr = float(params["stop_atr"])
+    target_atr = float(params["target_atr"])
+    max_hold_bars = int(params["max_hold_bars"])
 
     start_idx = get_first_row_on_or_after(ohlcv, active_from)
     if start_idx is None:
@@ -235,7 +260,6 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
             mae_abs=None,
         )
 
-    # přeskoč první bar po aktivaci, ať se level „narodí“ až po uzavřené periodě
     search_idx = start_idx + MIN_LEVEL_AGE_BARS
     if search_idx >= len(ohlcv):
         return TradeResult(
@@ -297,34 +321,109 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     future = ohlcv.iloc[search_idx:].copy()
 
     for i in range(len(future)):
-        bar = future.iloc[i]
-        atr = bar["ATR"]
+        touch_bar = future.iloc[i]
+        atr = touch_bar["ATR"]
 
         if pd.isna(atr) or atr <= 0:
             continue
 
-        if not side_touch(bar, level, side, float(atr)):
+        if not side_touch(touch_bar, level, side, float(atr)):
             continue
 
-        touch_date = pd.Timestamp(bar["Date"])
+        touch_date = pd.Timestamp(touch_bar["Date"])
         entry_date = touch_date
         entry_price = level
 
         if side == "long":
-            stop_price = entry_price - STOP_ATR * float(atr)
-            target_price = entry_price + TARGET_ATR * float(atr)
+            stop_price = entry_price - stop_atr * float(atr)
+            target_price = entry_price + target_atr * float(atr)
         else:
-            stop_price = entry_price + STOP_ATR * float(atr)
-            target_price = entry_price - TARGET_ATR * float(atr)
+            stop_price = entry_price + stop_atr * float(atr)
+            target_price = entry_price - target_atr * float(atr)
 
-        trade_window = future.iloc[i : i + MAX_HOLD_BARS + 1].copy()
+        # Den vstupu:
+        # - SL může být zasažen hned
+        # - PT ve stejný den IGNORUJEME
+        touch_high = float(touch_bar["High"])
+        touch_low = float(touch_bar["Low"])
+
+        if side == "long":
+            same_day_stop_hit = touch_low <= stop_price
+        else:
+            same_day_stop_hit = touch_high >= stop_price
+
+        if same_day_stop_hit:
+            pnl_abs = (stop_price - entry_price) if side == "long" else (entry_price - stop_price)
+            pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
+            return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
+
+            held_window = future.iloc[i : i + 1].copy()
+            mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+
+            return TradeResult(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_price=level,
+                side=side,
+                active_from=active_from.date().isoformat(),
+                touch_date=touch_date.date().isoformat(),
+                entry_date=entry_date.date().isoformat(),
+                exit_date=touch_date.date().isoformat(),
+                entry_price=round(entry_price, 6),
+                exit_price=round(float(stop_price), 6),
+                stop_price=round(stop_price, 6),
+                target_price=round(target_price, 6),
+                trend_context=trend_context,
+                trend_aligned=trend_aligned,
+                exit_reason="stop",
+                bars_held=0,
+                pnl_abs=round(float(pnl_abs), 6),
+                pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
+                return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
+                mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+                mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
+            )
+
+        # Od dalšího dne už sledujeme normálně SL i PT
+        post_entry_window = future.iloc[i + 1 : i + 1 + max_hold_bars].copy()
+
+        if post_entry_window.empty:
+            held_window = future.iloc[i : i + 1].copy()
+            mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+
+            return TradeResult(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_price=level,
+                side=side,
+                active_from=active_from.date().isoformat(),
+                touch_date=touch_date.date().isoformat(),
+                entry_date=entry_date.date().isoformat(),
+                exit_date=touch_date.date().isoformat(),
+                entry_price=round(entry_price, 6),
+                exit_price=round(float(touch_bar["Close"]), 6),
+                stop_price=round(stop_price, 6),
+                target_price=round(target_price, 6),
+                trend_context=trend_context,
+                trend_aligned=trend_aligned,
+                exit_reason="time",
+                bars_held=0,
+                pnl_abs=round(float((float(touch_bar["Close"]) - entry_price) if side == "long" else (entry_price - float(touch_bar["Close"]))), 6),
+                pnl_atr=np.nan,
+                return_pct=round(float((((float(touch_bar["Close"]) - entry_price) if side == "long" else (entry_price - float(touch_bar["Close"]))) / entry_price) * 100), 6),
+                mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+                mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
+            )
+
         exit_reason = "time"
-        exit_bar = trade_window.iloc[-1]
-        exit_date = pd.Timestamp(exit_bar["Date"])
-        exit_price = float(exit_bar["Close"])
+        last_bar = post_entry_window.iloc[-1]
+        exit_date = pd.Timestamp(last_bar["Date"])
+        exit_price = float(last_bar["Close"])
 
-        for j in range(len(trade_window)):
-            row = trade_window.iloc[j]
+        for j in range(len(post_entry_window)):
+            row = post_entry_window.iloc[j]
             dt = pd.Timestamp(row["Date"])
             high = float(row["High"])
             low = float(row["Low"])
@@ -337,9 +436,10 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
                 hit_target = low <= target_price
 
             if hit_stop and hit_target:
-                exit_reason = AMBIGUOUS_EXIT
+                # konzervativně: ambiguous = stop
+                exit_reason = "stop"
                 exit_date = dt
-                exit_price = np.nan
+                exit_price = stop_price
                 break
             elif hit_stop:
                 exit_reason = "stop"
@@ -352,19 +452,15 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
                 exit_price = target_price
                 break
 
-        held_window = trade_window.loc[trade_window["Date"] <= exit_date]
+        held_window = future.iloc[i:].copy()
+        held_window = held_window.loc[held_window["Date"] <= exit_date]
         mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
 
-        if pd.isna(exit_price):
-            pnl_abs = np.nan
-            pnl_atr = np.nan
-            return_pct = np.nan
-        else:
-            pnl_abs = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-            pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
-            return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
+        pnl_abs = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+        pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
+        return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
 
-        bars_held = max(len(held_window) - 1, 0)
+        bars_held = max((exit_date - entry_date).days, 0)
 
         return TradeResult(
             ticker=ticker,
@@ -377,14 +473,14 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
             entry_date=entry_date.date().isoformat(),
             exit_date=exit_date.date().isoformat(),
             entry_price=round(entry_price, 6),
-            exit_price=round(float(exit_price), 6) if pd.notna(exit_price) else np.nan,
+            exit_price=round(float(exit_price), 6),
             stop_price=round(stop_price, 6),
             target_price=round(target_price, 6),
             trend_context=trend_context,
             trend_aligned=trend_aligned,
             exit_reason=exit_reason,
             bars_held=bars_held,
-            pnl_abs=round(float(pnl_abs), 6) if pd.notna(pnl_abs) else np.nan,
+            pnl_abs=round(float(pnl_abs), 6),
             pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
             return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
             mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
@@ -423,7 +519,6 @@ def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
 
     df = trades.copy()
     df = df[df["entry_date"].notna()].copy()
-    df = df[df["exit_reason"] != AMBIGUOUS_EXIT].copy()
 
     if df.empty:
         return pd.DataFrame()
