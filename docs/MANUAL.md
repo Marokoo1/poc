@@ -150,3 +150,24 @@ backtest ještě není napojený na enriched logiku
 scoring je zatím jednoduchý
 
 validita levelů je první verze a bude se ještě ladit
+
+
+### 2) docs/MANUAL.md
+
+```bash
+cat > docs/MANUAL.md <<'EOF'
+# Manuál projektu
+
+## Přehled
+
+Projekt pracuje s Point of Control (POC) levely vypočítanými z lokálních OHLCV dat a nad nimi staví dvě vrstvy:
+
+1. **signálovou / analytickou vrstvu**
+2. **backtest vrstvu**
+
+## Vstupní data
+
+Raw OHLCV data jsou uložena v:
+
+```text
+data/raw/
