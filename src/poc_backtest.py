@@ -35,28 +35,28 @@ ENTRY_BUFFER_ATR = 0.30
 
 PERIOD_PARAMS = {
     "weekly": {
-        "stop_atr": 1.0,
-        "target_atr": 1.0,
-        "max_hold_bars": 10,
-        "require_departure": True,
-        "activation_threshold_mode": "atr",   # "atr" | "pct" | "absolute"
-        "activation_threshold_value": 1.0,
-    },
-    "monthly": {
         "stop_atr": 1.5,
         "target_atr": 2.0,
         "max_hold_bars": 20,
         "require_departure": True,
         "activation_threshold_mode": "atr",
-        "activation_threshold_value": 1.25,
+        "activation_threshold_value": 1.75,
     },
-    "yearly": {
+    "monthly": {
         "stop_atr": 2.0,
         "target_atr": 3.0,
-        "max_hold_bars": 40,
+        "max_hold_bars": 35,
         "require_departure": True,
         "activation_threshold_mode": "atr",
-        "activation_threshold_value": 1.5,
+        "activation_threshold_value": 2.25,
+    },
+    "yearly": {
+        "stop_atr": 3.0,
+        "target_atr": 4.5,
+        "max_hold_bars": 60,
+        "require_departure": True,
+        "activation_threshold_mode": "atr",
+        "activation_threshold_value": 3.0,
     },
 }
 
