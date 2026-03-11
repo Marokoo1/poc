@@ -1,404 +1,623 @@
-# Updated poc_backtest.py with departure-from-level activation logic
-# Generated from current repo version with configurable threshold.
-
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = PROJECT_ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
-PROCESSED_DIR = DATA_DIR / "processed"
-RESULTS_DIR = PROJECT_ROOT / "results"
-REPORTS_DIR = RESULTS_DIR / "reports"
-CHARTS_DIR = RESULTS_DIR / "charts"
+from poc_calculator import calculate_period_poc, filter_complete_periods
 
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+# ============================================================
+# PATHS
+# ============================================================
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+RAW_DIR = PROJECT_DIR / "data" / "raw"
+PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
 
-TICKERS = ["SPY", "DIA", "GLD", "TLT", "XLE"]
-TIMEFRAME = "1d"
-START_DATE = None
-END_DATE = None
+TRADES_FILE = PROCESSED_DIR / "poc_backtest_trades.csv"
+SUMMARY_FILE = PROCESSED_DIR / "poc_backtest_summary.csv"
+LEVELS_FILE = PROCESSED_DIR / "poc_backtest_levels.csv"
+
+# ============================================================
+# SETTINGS
+# ============================================================
+ATR_PERIOD = 14
+EMA_FAST = 50
+EMA_SLOW = 200
+
+INCLUDE_PERIODS = ("weekly", "monthly", "yearly")
+MIN_LEVEL_AGE_BARS = 1
 
 ENTRY_BUFFER_ATR = 0.30
-SL_BUFFER_ATR = 0.20
-TP_MULTIPLE = 1.5
-TIME_EXIT_BARS = 15
-ATR_PERIOD = 14
-COMMISSION_PER_TRADE = 0.0
-SLIPPAGE_PCT = 0.0
-MIN_ATR = 1e-9
-MAX_OPEN_TRADES_PER_TICKER = 1
-ALLOW_MULTIPLE_LEVELS_SAME_DAY = False
 
-# --- New configurable activation / arming logic ---
-REQUIRE_DEPARTURE_FROM_LEVEL = True
-ACTIVATION_THRESHOLD_MODE = "atr"      # "atr" | "pct" | "absolute"
-ACTIVATION_THRESHOLD_VALUE = 0.75       # e.g. 0.75 ATR, 0.5 %, or absolute points/pips
-# --------------------------------------------------
-
-LEVEL_COLORS = {
-    "W": "WeeklyPOC",
-    "M": "MonthlyPOC",
-    "Y": "YearlyPOC",
+PERIOD_PARAMS = {
+    "weekly": {
+        "stop_atr": 1.0,
+        "target_atr": 1.0,
+        "max_hold_bars": 10,
+    },
+    "monthly": {
+        "stop_atr": 1.5,
+        "target_atr": 2.0,
+        "max_hold_bars": 20,
+    },
+    "yearly": {
+        "stop_atr": 2.0,
+        "target_atr": 3.0,
+        "max_hold_bars": 40,
+    },
 }
 
+AMBIGUOUS_EXIT = "ambiguous"
 
+# ============================================================
+# DATA MODEL
+# ============================================================
 @dataclass
 class TradeResult:
     ticker: str
-    level_type: str
+    period_type: str
+    period: str
+    level_price: float
     side: str
-    level: float
-    active_from: pd.Timestamp
-    entry_date: pd.Timestamp | None
-    entry_price: float | None
-    stop_price: float | None
-    target_price: float | None
-    exit_date: pd.Timestamp | None
-    exit_price: float | None
+    active_from: str
+
+    touch_date: Optional[str]
+    entry_date: Optional[str]
+    exit_date: Optional[str]
+
+    entry_price: Optional[float]
+    exit_price: Optional[float]
+    stop_price: Optional[float]
+    target_price: Optional[float]
+
+    trend_context: str
+    trend_aligned: bool
+
     exit_reason: str
-    bars_held: int | None
-    pnl_abs: float | None
-    pnl_r: float | None
-    mfe: float | None
-    mae: float | None
+    bars_held: Optional[int]
+
+    pnl_abs: Optional[float]
+    pnl_atr: Optional[float]
+    return_pct: Optional[float]
+
+    mfe_abs: Optional[float]
+    mae_abs: Optional[float]
 
 
+# ============================================================
+# LOADERS / INDICATORS
+# ============================================================
 def load_ohlcv(ticker: str) -> pd.DataFrame:
-    path = RAW_DIR / f"{ticker}_{TIMEFRAME}.csv"
+    path = RAW_DIR / f"{ticker}.csv"
     if not path.exists():
-        raise FileNotFoundError(f"Missing OHLCV file: {path}")
-    df = pd.read_csv(path)
-    df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_convert(None)
+        return pd.DataFrame()
+
+    df = pd.read_csv(path, parse_dates=["Date"])
+    required = {"Date", "Open", "High", "Low", "Close", "Volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{path.name} nemá požadované sloupce: {sorted(missing)}")
+
     df = df.sort_values("Date").reset_index(drop=True)
-    if START_DATE:
-        df = df[df["Date"] >= pd.Timestamp(START_DATE)]
-    if END_DATE:
-        df = df[df["Date"] <= pd.Timestamp(END_DATE)]
-    return df.reset_index(drop=True)
+    return df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
 
 
-def load_levels(ticker: str) -> pd.DataFrame:
-    path = PROCESSED_DIR / f"{ticker}_poc_levels.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing POC levels file: {path}")
-    df = pd.read_csv(path)
-    for c in ["PeriodStart", "PeriodEnd", "ActiveFrom"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], utc=True).dt.tz_convert(None)
-    return df.sort_values(["ActiveFrom", "LevelType"]).reset_index(drop=True)
-
-
-def add_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+
     prev_close = out["Close"].shift(1)
-    tr = pd.concat(
+    tr_components = pd.concat(
         [
             out["High"] - out["Low"],
             (out["High"] - prev_close).abs(),
             (out["Low"] - prev_close).abs(),
         ],
         axis=1,
-    ).max(axis=1)
-    out["ATR"] = tr.rolling(period, min_periods=1).mean()
-    out["ATR"] = out["ATR"].clip(lower=MIN_ATR)
+    )
+    out["TR"] = tr_components.max(axis=1)
+    out["ATR"] = out["TR"].rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    out["EMA50"] = out["Close"].ewm(span=EMA_FAST, adjust=False).mean()
+    out["EMA200"] = out["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
+
+    close = out["Close"]
+    ema50 = out["EMA50"]
+    ema200 = out["EMA200"]
+
+    out["TrendContext"] = np.where(
+        (close > ema50) & (ema50 > ema200),
+        "up",
+        np.where((close < ema50) & (ema50 < ema200), "down", "neutral"),
+    )
+
     return out
 
 
-def side_touch(side: str, high: float, low: float, level: float, buffer_abs: float) -> bool:
+# ============================================================
+# HISTORICAL LEVEL GENERATION
+# ============================================================
+def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+
+    for period_type in INCLUDE_PERIODS:
+        poc_df = calculate_period_poc(price_df.copy(), period=period_type)
+        if poc_df.empty:
+            continue
+
+        poc_df = filter_complete_periods(poc_df, period=period_type)
+        if poc_df.empty:
+            continue
+
+        poc_df["Ticker"] = ticker
+        poc_df["PeriodType"] = period_type
+        poc_df["PeriodStart"] = pd.to_datetime(poc_df["PeriodStart"], errors="coerce")
+        poc_df["PeriodEnd"] = pd.to_datetime(poc_df["PeriodEnd"], errors="coerce")
+        poc_df["ActiveFrom"] = poc_df["PeriodEnd"] + pd.Timedelta(days=1)
+
+        frames.append(poc_df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.sort_values(["ActiveFrom", "PeriodType", "Period"]).reset_index(drop=True)
+    return out
+
+
+# ============================================================
+# BACKTEST HELPERS
+# ============================================================
+def get_first_row_on_or_after(df: pd.DataFrame, dt: pd.Timestamp) -> Optional[int]:
+    matches = df.index[df["Date"] >= dt].tolist()
+    return matches[0] if matches else None
+
+
+def infer_side_from_activation(close_at_activation: float, level: float) -> str:
+    if pd.isna(close_at_activation) or pd.isna(level):
+        return "unknown"
+    if close_at_activation > level:
+        return "long"
+    if close_at_activation < level:
+        return "short"
+    return "at_level"
+
+
+def is_trend_aligned(side: str, trend_context: str) -> bool:
+    return (side == "long" and trend_context == "up") or (
+        side == "short" and trend_context == "down"
+    )
+
+
+def side_touch(bar: pd.Series, level: float, side: str, atr: float) -> bool:
+    buffer_abs = ENTRY_BUFFER_ATR * atr
+
     if side == "long":
-        return low <= level + buffer_abs
-    return high >= level - buffer_abs
+        return float(bar["Low"]) <= level + buffer_abs
+    if side == "short":
+        return float(bar["High"]) >= level - buffer_abs
+    return False
 
 
-def compute_activation_threshold(level: float, atr: float) -> float:
-    mode = str(ACTIVATION_THRESHOLD_MODE).lower()
-    value = float(ACTIVATION_THRESHOLD_VALUE)
-    if value < 0:
-        value = 0.0
-    if mode == "atr":
-        return max(value * max(float(atr), MIN_ATR), 0.0)
-    if mode == "pct":
-        return max(abs(level) * (value / 100.0), 0.0)
-    if mode == "absolute":
-        return max(value, 0.0)
-    raise ValueError(f"Unsupported ACTIVATION_THRESHOLD_MODE: {ACTIVATION_THRESHOLD_MODE}")
+def compute_mfe_mae(window: pd.DataFrame, entry: float, side: str) -> tuple[float, float]:
+    if window.empty:
+        return np.nan, np.nan
 
-
-def departure_reached(side: str, high: float, low: float, level: float, threshold_abs: float) -> bool:
-    if threshold_abs <= 0:
-        return True
     if side == "long":
-        return high >= level + threshold_abs
-    return low <= level - threshold_abs
+        mfe = float(window["High"].max()) - entry
+        mae = float(window["Low"].min()) - entry
+    else:
+        mfe = entry - float(window["Low"].min())
+        mae = entry - float(window["High"].max())
+
+    return round(mfe, 6), round(mae, 6)
 
 
-def simulate_single_level(
-    ticker: str,
-    level_row: pd.Series,
-    bars: pd.DataFrame,
-) -> TradeResult:
+def get_period_params(period_type: str) -> dict:
+    if period_type not in PERIOD_PARAMS:
+        raise ValueError(f"Neznámé PeriodType pro params: {period_type}")
+    return PERIOD_PARAMS[period_type]
+
+
+def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeResult:
+    ticker = str(level_row["Ticker"])
+    period_type = str(level_row["PeriodType"])
+    period = str(level_row["Period"])
     level = float(level_row["POC"])
-    level_type = str(level_row["LevelType"])
     active_from = pd.Timestamp(level_row["ActiveFrom"])
 
-    search_idx = bars.index[bars["Date"] >= active_from]
-    if len(search_idx) == 0:
+    params = get_period_params(period_type)
+    stop_atr = float(params["stop_atr"])
+    target_atr = float(params["target_atr"])
+    max_hold_bars = int(params["max_hold_bars"])
+
+    start_idx = get_first_row_on_or_after(ohlcv, active_from)
+    if start_idx is None:
         return TradeResult(
             ticker=ticker,
-            level_type=level_type,
-            side="na",
-            level=level,
-            active_from=active_from,
+            period_type=period_type,
+            period=period,
+            level_price=level,
+            side="unknown",
+            active_from=active_from.date().isoformat(),
+            touch_date=None,
             entry_date=None,
+            exit_date=None,
             entry_price=None,
+            exit_price=None,
             stop_price=None,
             target_price=None,
-            exit_date=None,
-            exit_price=None,
-            exit_reason="not_active_in_data",
+            trend_context="unknown",
+            trend_aligned=False,
+            exit_reason="no_data_after_active_from",
             bars_held=None,
             pnl_abs=None,
-            pnl_r=None,
-            mfe=None,
-            mae=None,
+            pnl_atr=None,
+            return_pct=None,
+            mfe_abs=None,
+            mae_abs=None,
         )
 
-    start_i = int(search_idx[0])
-    first_bar = bars.iloc[start_i]
-    side = "long" if float(first_bar["Close"]) > level else "short"
-
-    armed_i = start_i
-    if REQUIRE_DEPARTURE_FROM_LEVEL:
-        armed_i = None
-        for i in range(start_i, len(bars)):
-            bar = bars.iloc[i]
-            threshold_abs = compute_activation_threshold(level, float(bar["ATR"]))
-            if departure_reached(side, float(bar["High"]), float(bar["Low"]), level, threshold_abs):
-                # arm only after the departure bar has completed
-                armed_i = i + 1
-                break
-        if armed_i is None or armed_i >= len(bars):
-            return TradeResult(
-                ticker=ticker,
-                level_type=level_type,
-                side=side,
-                level=level,
-                active_from=active_from,
-                entry_date=None,
-                entry_price=None,
-                stop_price=None,
-                target_price=None,
-                exit_date=None,
-                exit_price=None,
-                exit_reason="no_departure",
-                bars_held=None,
-                pnl_abs=None,
-                pnl_r=None,
-                mfe=None,
-                mae=None,
-            )
-
-    entry_i = None
-    entry_price = None
-    stop_price = None
-    target_price = None
-    initial_risk = None
-
-    for i in range(armed_i, len(bars)):
-        bar = bars.iloc[i]
-        atr = float(bar["ATR"])
-        entry_buffer = ENTRY_BUFFER_ATR * atr
-        if side_touch(side, float(bar["High"]), float(bar["Low"]), level, entry_buffer):
-            entry_i = i
-            entry_date = pd.Timestamp(bar["Date"])
-            entry_price = level
-            if side == "long":
-                stop_price = level - SL_BUFFER_ATR * atr
-                initial_risk = entry_price - stop_price
-                target_price = entry_price + TP_MULTIPLE * initial_risk
-            else:
-                stop_price = level + SL_BUFFER_ATR * atr
-                initial_risk = stop_price - entry_price
-                target_price = entry_price - TP_MULTIPLE * initial_risk
-            break
-
-    if entry_i is None:
+    search_idx = start_idx + MIN_LEVEL_AGE_BARS
+    if search_idx >= len(ohlcv):
         return TradeResult(
             ticker=ticker,
-            level_type=level_type,
+            period_type=period_type,
+            period=period,
+            level_price=level,
+            side="unknown",
+            active_from=active_from.date().isoformat(),
+            touch_date=None,
+            entry_date=None,
+            exit_date=None,
+            entry_price=None,
+            exit_price=None,
+            stop_price=None,
+            target_price=None,
+            trend_context="unknown",
+            trend_aligned=False,
+            exit_reason="not_enough_future_bars",
+            bars_held=None,
+            pnl_abs=None,
+            pnl_atr=None,
+            return_pct=None,
+            mfe_abs=None,
+            mae_abs=None,
+        )
+
+    activation_row = ohlcv.iloc[start_idx]
+    side = infer_side_from_activation(float(activation_row["Close"]), level)
+    trend_context = str(activation_row["TrendContext"]).lower()
+    trend_aligned = is_trend_aligned(side, trend_context)
+
+    if side not in {"long", "short"}:
+        return TradeResult(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level_price=level,
             side=side,
-            level=level,
-            active_from=active_from,
+            active_from=active_from.date().isoformat(),
+            touch_date=None,
             entry_date=None,
+            exit_date=None,
             entry_price=None,
+            exit_price=None,
             stop_price=None,
             target_price=None,
-            exit_date=None,
-            exit_price=None,
-            exit_reason="no_touch",
+            trend_context=trend_context,
+            trend_aligned=trend_aligned,
+            exit_reason="invalid_side",
             bars_held=None,
             pnl_abs=None,
-            pnl_r=None,
-            mfe=None,
-            mae=None,
+            pnl_atr=None,
+            return_pct=None,
+            mfe_abs=None,
+            mae_abs=None,
         )
 
-    exit_i = None
-    exit_price = None
-    exit_reason = None
-    mfe = 0.0
-    mae = 0.0
+    future = ohlcv.iloc[search_idx:].copy()
 
-    for i in range(entry_i, min(entry_i + TIME_EXIT_BARS + 1, len(bars))):
-        bar = bars.iloc[i]
-        high = float(bar["High"])
-        low = float(bar["Low"])
+    for i in range(len(future)):
+        touch_bar = future.iloc[i]
+        atr = touch_bar["ATR"]
+
+        if pd.isna(atr) or atr <= 0:
+            continue
+
+        if not side_touch(touch_bar, level, side, float(atr)):
+            continue
+
+        touch_date = pd.Timestamp(touch_bar["Date"])
+        entry_date = touch_date
+        entry_price = level
 
         if side == "long":
-            mfe = max(mfe, high - entry_price)
-            mae = min(mae, low - entry_price)
-            stop_hit = low <= stop_price
-            target_hit = high >= target_price
-            if stop_hit and target_hit:
-                exit_i = i
-                exit_price = stop_price
-                exit_reason = "stop_and_target_same_bar"
-                break
-            if stop_hit:
-                exit_i = i
-                exit_price = stop_price
-                exit_reason = "stop"
-                break
-            if target_hit:
-                exit_i = i
-                exit_price = target_price
-                exit_reason = "target"
-                break
+            stop_price = entry_price - stop_atr * float(atr)
+            target_price = entry_price + target_atr * float(atr)
         else:
-            mfe = max(mfe, entry_price - low)
-            mae = min(mae, entry_price - high)
-            stop_hit = high >= stop_price
-            target_hit = low <= target_price
-            if stop_hit and target_hit:
-                exit_i = i
-                exit_price = stop_price
-                exit_reason = "stop_and_target_same_bar"
-                break
-            if stop_hit:
-                exit_i = i
-                exit_price = stop_price
+            stop_price = entry_price + stop_atr * float(atr)
+            target_price = entry_price - target_atr * float(atr)
+
+        # Den vstupu:
+        # - SL může být zasažen hned
+        # - PT ve stejný den IGNORUJEME
+        touch_high = float(touch_bar["High"])
+        touch_low = float(touch_bar["Low"])
+
+        if side == "long":
+            same_day_stop_hit = touch_low <= stop_price
+        else:
+            same_day_stop_hit = touch_high >= stop_price
+
+        if same_day_stop_hit:
+            pnl_abs = (stop_price - entry_price) if side == "long" else (entry_price - stop_price)
+            pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
+            return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
+
+            held_window = future.iloc[i : i + 1].copy()
+            mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+
+            return TradeResult(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_price=level,
+                side=side,
+                active_from=active_from.date().isoformat(),
+                touch_date=touch_date.date().isoformat(),
+                entry_date=entry_date.date().isoformat(),
+                exit_date=touch_date.date().isoformat(),
+                entry_price=round(entry_price, 6),
+                exit_price=round(float(stop_price), 6),
+                stop_price=round(stop_price, 6),
+                target_price=round(target_price, 6),
+                trend_context=trend_context,
+                trend_aligned=trend_aligned,
+                exit_reason="stop",
+                bars_held=0,
+                pnl_abs=round(float(pnl_abs), 6),
+                pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
+                return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
+                mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+                mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
+            )
+
+        # Od dalšího dne už sledujeme normálně SL i PT
+        post_entry_window = future.iloc[i + 1 : i + 1 + max_hold_bars].copy()
+
+        if post_entry_window.empty:
+            held_window = future.iloc[i : i + 1].copy()
+            mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+
+            return TradeResult(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_price=level,
+                side=side,
+                active_from=active_from.date().isoformat(),
+                touch_date=touch_date.date().isoformat(),
+                entry_date=entry_date.date().isoformat(),
+                exit_date=touch_date.date().isoformat(),
+                entry_price=round(entry_price, 6),
+                exit_price=round(float(touch_bar["Close"]), 6),
+                stop_price=round(stop_price, 6),
+                target_price=round(target_price, 6),
+                trend_context=trend_context,
+                trend_aligned=trend_aligned,
+                exit_reason="time",
+                bars_held=0,
+                pnl_abs=round(float((float(touch_bar["Close"]) - entry_price) if side == "long" else (entry_price - float(touch_bar["Close"]))), 6),
+                pnl_atr=np.nan,
+                return_pct=round(float((((float(touch_bar["Close"]) - entry_price) if side == "long" else (entry_price - float(touch_bar["Close"]))) / entry_price) * 100), 6),
+                mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+                mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
+            )
+
+        exit_reason = "time"
+        last_bar = post_entry_window.iloc[-1]
+        exit_date = pd.Timestamp(last_bar["Date"])
+        exit_price = float(last_bar["Close"])
+
+        for j in range(len(post_entry_window)):
+            row = post_entry_window.iloc[j]
+            dt = pd.Timestamp(row["Date"])
+            high = float(row["High"])
+            low = float(row["Low"])
+
+            if side == "long":
+                hit_stop = low <= stop_price
+                hit_target = high >= target_price
+            else:
+                hit_stop = high >= stop_price
+                hit_target = low <= target_price
+
+            if hit_stop and hit_target:
+                # konzervativně: ambiguous = stop
                 exit_reason = "stop"
+                exit_date = dt
+                exit_price = stop_price
                 break
-            if target_hit:
-                exit_i = i
-                exit_price = target_price
+            elif hit_stop:
+                exit_reason = "stop"
+                exit_date = dt
+                exit_price = stop_price
+                break
+            elif hit_target:
                 exit_reason = "target"
+                exit_date = dt
+                exit_price = target_price
                 break
 
-    if exit_i is None:
-        exit_i = min(entry_i + TIME_EXIT_BARS, len(bars) - 1)
-        exit_bar = bars.iloc[exit_i]
-        exit_price = float(exit_bar["Close"])
-        exit_reason = "time_exit"
+        held_window = future.iloc[i:].copy()
+        held_window = held_window.loc[held_window["Date"] <= exit_date]
+        mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
 
-    exit_date = pd.Timestamp(bars.iloc[exit_i]["Date"])
-    bars_held = exit_i - entry_i
+        pnl_abs = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+        pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
+        return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
 
-    if side == "long":
-        pnl_abs = exit_price - entry_price
-    else:
-        pnl_abs = entry_price - exit_price
+        bars_held = max((exit_date - entry_date).days, 0)
 
-    if SLIPPAGE_PCT:
-        pnl_abs -= abs(entry_price) * (SLIPPAGE_PCT / 100.0)
-        pnl_abs -= abs(exit_price) * (SLIPPAGE_PCT / 100.0)
-    pnl_abs -= COMMISSION_PER_TRADE
-
-    pnl_r = pnl_abs / initial_risk if initial_risk and initial_risk > 0 else math.nan
+        return TradeResult(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level_price=level,
+            side=side,
+            active_from=active_from.date().isoformat(),
+            touch_date=touch_date.date().isoformat(),
+            entry_date=entry_date.date().isoformat(),
+            exit_date=exit_date.date().isoformat(),
+            entry_price=round(entry_price, 6),
+            exit_price=round(float(exit_price), 6),
+            stop_price=round(stop_price, 6),
+            target_price=round(target_price, 6),
+            trend_context=trend_context,
+            trend_aligned=trend_aligned,
+            exit_reason=exit_reason,
+            bars_held=bars_held,
+            pnl_abs=round(float(pnl_abs), 6),
+            pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
+            return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
+            mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+            mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
+        )
 
     return TradeResult(
         ticker=ticker,
-        level_type=level_type,
+        period_type=period_type,
+        period=period,
+        level_price=level,
         side=side,
-        level=level,
-        active_from=active_from,
-        entry_date=entry_date,
-        entry_price=entry_price,
-        stop_price=stop_price,
-        target_price=target_price,
-        exit_date=exit_date,
-        exit_price=exit_price,
-        exit_reason=exit_reason,
-        bars_held=bars_held,
-        pnl_abs=pnl_abs,
-        pnl_r=pnl_r,
-        mfe=mfe,
-        mae=mae,
+        active_from=active_from.date().isoformat(),
+        touch_date=None,
+        entry_date=None,
+        exit_date=None,
+        entry_price=None,
+        exit_price=None,
+        stop_price=None,
+        target_price=None,
+        trend_context=trend_context,
+        trend_aligned=trend_aligned,
+        exit_reason="no_touch",
+        bars_held=None,
+        pnl_abs=None,
+        pnl_atr=None,
+        return_pct=None,
+        mfe_abs=None,
+        mae_abs=None,
     )
 
 
-def run_backtest() -> pd.DataFrame:
-    all_results: list[dict[str, Any]] = []
-
-    for ticker in TICKERS:
-        bars = add_atr(load_ohlcv(ticker))
-        levels = load_levels(ticker)
-
-        for _, level_row in levels.iterrows():
-            result = simulate_single_level(ticker, level_row, bars)
-            all_results.append(result.__dict__)
-
-    return pd.DataFrame(all_results)
-
-
-def summarize_results(results: pd.DataFrame) -> pd.DataFrame:
-    if results.empty:
+def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
+    if trades.empty:
         return pd.DataFrame()
 
-    trades = results.dropna(subset=["entry_date", "exit_date", "pnl_abs"]).copy()
-    if trades.empty:
-        return pd.DataFrame(
-            [{"metric": "total_levels", "value": len(results)}, {"metric": "executed_trades", "value": 0}]
-        )
+    df = trades.copy()
+    df = df[df["entry_date"].notna()].copy()
 
-    wins = (trades["pnl_abs"] > 0).sum()
-    losses = (trades["pnl_abs"] <= 0).sum()
-    summary = pd.DataFrame(
-        [
-            {"metric": "total_levels", "value": len(results)},
-            {"metric": "executed_trades", "value": len(trades)},
-            {"metric": "wins", "value": int(wins)},
-            {"metric": "losses", "value": int(losses)},
-            {"metric": "win_rate_pct", "value": float(wins / len(trades) * 100.0)},
-            {"metric": "total_pnl_abs", "value": float(trades["pnl_abs"].sum())},
-            {"metric": "avg_pnl_abs", "value": float(trades["pnl_abs"].mean())},
-            {"metric": "avg_pnl_r", "value": float(trades["pnl_r"].mean())},
-        ]
+    if df.empty:
+        return pd.DataFrame()
+
+    df["win"] = df["pnl_abs"] > 0
+
+    summary = (
+        df.groupby(["period_type", "side", "trend_aligned"], dropna=False, observed=False)
+        .agg(
+            trades=("ticker", "count"),
+            win_rate=("win", "mean"),
+            avg_pnl_abs=("pnl_abs", "mean"),
+            median_pnl_abs=("pnl_abs", "median"),
+            avg_pnl_atr=("pnl_atr", "mean"),
+            avg_return_pct=("return_pct", "mean"),
+            median_return_pct=("return_pct", "median"),
+            avg_mfe=("mfe_abs", "mean"),
+            avg_mae=("mae_abs", "mean"),
+            avg_bars_held=("bars_held", "mean"),
+        )
+        .reset_index()
     )
+
+    summary["win_rate"] = (summary["win_rate"] * 100).round(2)
     return summary
 
 
+# ============================================================
+# MAIN
+# ============================================================
 def main() -> None:
-    results = run_backtest()
-    results_path = REPORTS_DIR / "poc_backtest_results.csv"
-    summary_path = REPORTS_DIR / "poc_backtest_summary.csv"
+    raw_files = sorted(RAW_DIR.glob("*.csv"))
+    if not raw_files:
+        raise FileNotFoundError(f"V {RAW_DIR} nebyly nalezeny žádné raw CSV soubory.")
 
-    results.to_csv(results_path, index=False)
-    summary = summarize_results(results)
-    summary.to_csv(summary_path, index=False)
+    all_levels: list[pd.DataFrame] = []
+    all_results: list[dict] = []
 
-    print(f"Saved results to: {results_path}")
-    print(f"Saved summary to: {summary_path}")
-    print(summary)
+    tickers = [p.stem for p in raw_files]
+    print(f"🎯 Historický backtest tickerů: {', '.join(tickers)}")
+
+    for path in raw_files:
+        ticker = path.stem
+        print(f"Zpracovávám {ticker}...")
+
+        ohlcv = load_ohlcv(ticker)
+        if ohlcv.empty:
+            print(f"  ⚠️ Chybí nebo jsou neplatná raw data")
+            continue
+
+        ohlcv = add_indicators(ohlcv)
+
+        levels = build_all_levels_for_ticker(ticker, ohlcv)
+        if levels.empty:
+            print(f"  ⚠️ Nevznikly žádné historické levely")
+            continue
+
+        all_levels.append(levels)
+
+        for _, level_row in levels.iterrows():
+            result = simulate_single_level(level_row, ohlcv)
+            all_results.append(asdict(result))
+
+        print(f"  ✅ Historických levelů: {len(levels)}")
+
+    if not all_results:
+        print("⚠️ Nevznikly žádné výsledky.")
+        return
+
+    levels_df = pd.concat(all_levels, ignore_index=True) if all_levels else pd.DataFrame()
+    trades_df = pd.DataFrame(all_results)
+    summary_df = build_summary(trades_df)
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    levels_df.to_csv(LEVELS_FILE, index=False)
+    trades_df.to_csv(TRADES_FILE, index=False)
+    if not summary_df.empty:
+        summary_df.to_csv(SUMMARY_FILE, index=False)
+
+    print()
+    print(f"✅ Levels uloženy do: {LEVELS_FILE}")
+    print(f"✅ Trades uloženy do: {TRADES_FILE}")
+    if not summary_df.empty:
+        print(f"✅ Summary uloženo do: {SUMMARY_FILE}")
+
+    print("\nUkázka obchodů:")
+    preview_cols = [
+        "ticker",
+        "period_type",
+        "period",
+        "side",
+        "entry_date",
+        "exit_date",
+        "exit_reason",
+        "pnl_abs",
+        "pnl_atr",
+    ]
+    preview_cols = [c for c in preview_cols if c in trades_df.columns]
+    print(trades_df[preview_cols].head(20).to_string(index=False))
 
 
 if __name__ == "__main__":
