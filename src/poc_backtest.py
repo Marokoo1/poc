@@ -38,16 +38,25 @@ PERIOD_PARAMS = {
         "stop_atr": 1.0,
         "target_atr": 1.0,
         "max_hold_bars": 10,
+        "require_departure": True,
+        "activation_threshold_mode": "atr",   # "atr" | "pct" | "absolute"
+        "activation_threshold_value": 1.0,
     },
     "monthly": {
         "stop_atr": 1.5,
         "target_atr": 2.0,
         "max_hold_bars": 20,
+        "require_departure": True,
+        "activation_threshold_mode": "atr",
+        "activation_threshold_value": 1.25,
     },
     "yearly": {
         "stop_atr": 2.0,
         "target_atr": 3.0,
         "max_hold_bars": 40,
+        "require_departure": True,
+        "activation_threshold_mode": "atr",
+        "activation_threshold_value": 1.5,
     },
 }
 
@@ -220,6 +229,36 @@ def get_period_params(period_type: str) -> dict:
         raise ValueError(f"Neznámé PeriodType pro params: {period_type}")
     return PERIOD_PARAMS[period_type]
 
+def compute_activation_threshold(level: float, atr: float, mode: str, value: float) -> float:
+    mode = str(mode).lower()
+    value = float(value)
+
+    if value < 0:
+        value = 0.0
+
+    if mode == "atr":
+        return value * float(atr)
+    if mode == "pct":
+        return abs(float(level)) * (value / 100.0)
+    if mode == "absolute":
+        return value
+
+    raise ValueError(f"Neznámý activation_threshold_mode: {mode}")
+
+
+def departure_reached(bar: pd.Series, level: float, side: str, threshold_abs: float) -> bool:
+    if threshold_abs <= 0:
+        return True
+
+    high = float(bar["High"])
+    low = float(bar["Low"])
+
+    if side == "long":
+        return high >= level + threshold_abs
+    if side == "short":
+        return low <= level - threshold_abs
+    return False
+
 
 def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeResult:
     ticker = str(level_row["Ticker"])
@@ -232,6 +271,9 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     stop_atr = float(params["stop_atr"])
     target_atr = float(params["target_atr"])
     max_hold_bars = int(params["max_hold_bars"])
+    require_departure = bool(params.get("require_departure", False))
+    activation_threshold_mode = str(params.get("activation_threshold_mode", "atr"))
+    activation_threshold_value = float(params.get("activation_threshold_value", 0.0))
 
     start_idx = get_first_row_on_or_after(ohlcv, active_from)
     if start_idx is None:
@@ -320,7 +362,58 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
 
     future = ohlcv.iloc[search_idx:].copy()
 
-    for i in range(len(future)):
+    entry_search_start = 0
+
+    if require_departure:
+        armed_index = None
+
+        for i in range(len(future)):
+            depart_bar = future.iloc[i]
+            depart_atr = depart_bar["ATR"]
+
+            if pd.isna(depart_atr) or depart_atr <= 0:
+                continue
+
+            threshold_abs = compute_activation_threshold(
+                level=level,
+                atr=float(depart_atr),
+                mode=activation_threshold_mode,
+                value=activation_threshold_value,
+            )
+
+            if departure_reached(depart_bar, level, side, threshold_abs):
+                armed_index = i + 1
+                break
+
+        if armed_index is None or armed_index >= len(future):
+            return TradeResult(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_price=level,
+                side=side,
+                active_from=active_from.date().isoformat(),
+                touch_date=None,
+                entry_date=None,
+                exit_date=None,
+                entry_price=None,
+                exit_price=None,
+                stop_price=None,
+                target_price=None,
+                trend_context=trend_context,
+                trend_aligned=trend_aligned,
+                exit_reason="no_departure",
+                bars_held=None,
+                pnl_abs=None,
+                pnl_atr=None,
+                return_pct=None,
+                mfe_abs=None,
+                mae_abs=None,
+            )
+
+        entry_search_start = armed_index
+
+    for i in range(entry_search_start, len(future)):
         touch_bar = future.iloc[i]
         atr = touch_bar["ATR"]
 
