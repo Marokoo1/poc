@@ -61,3 +61,9 @@ poc/
 │   └── config.py
 ├── README.md
 └── requirements.txt
+
+
+python3 src/poc_signals.py
+python3 src/poc_backtest.py
+streamlit run src/poc_dashboard.py
+streamlit run src/poc_backtest_dashboard.py
