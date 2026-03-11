@@ -390,4 +390,16 @@ def summarize_results(results: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     results = run_backtest()
     results_path = REPORTS_DIR / "poc_backtest_results.csv"
-    summary_path = REPORTS
+    summary_path = REPORTS_DIR / "poc_backtest_summary.csv"
+
+    results.to_csv(results_path, index=False)
+    summary = summarize_results(results)
+    summary.to_csv(summary_path, index=False)
+
+    print(f"Saved results to: {results_path}")
+    print(f"Saved summary to: {summary_path}")
+    print(summary)
+
+
+if __name__ == "__main__":
+    main()
