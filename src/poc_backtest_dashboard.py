@@ -328,47 +328,203 @@ def main() -> None:
         st.dataframe(filtered, width="stretch", hide_index=True)
 
     with tab4:
-        st.subheader("Graf konkrétního obchodu")
+    st.subheader("Graf konkrétního obchodu")
 
-        if real_trades.empty:
-            st.info("Nejsou k dispozici žádné obchody s entry.")
-            return
+    if real_trades.empty:
+        st.info("Nejsou k dispozici žádné obchody s entry.")
+        return
 
-        trade_selector_df = real_trades.copy().sort_values(["entry_date", "ticker"], ascending=[False, True]).reset_index(drop=True)
-        trade_selector_df["label"] = (
-            trade_selector_df["ticker"].astype(str)
-            + " | "
-            + trade_selector_df["period_type"].astype(str)
-            + " | "
-            + trade_selector_df["period"].astype(str)
-            + " | "
-            + trade_selector_df["side"].astype(str)
-            + " | "
-            + trade_selector_df["entry_date"].dt.strftime("%Y-%m-%d")
-            + " | "
-            + trade_selector_df["exit_reason"].astype(str)
-            + " | pnl="
-            + trade_selector_df["pnl_abs"].round(2).astype(str)
+    f1, f2, f3, f4, f5, f6 = st.columns(6)
+
+    chart_tickers = ["ALL"] + sorted(real_trades["ticker"].dropna().unique().tolist())
+    chart_periods = ["ALL"] + sorted(real_trades["period_type"].dropna().unique().tolist())
+    chart_sides = ["ALL"] + sorted(real_trades["side"].dropna().unique().tolist())
+    chart_exits = ["ALL"] + sorted(real_trades["exit_reason"].dropna().unique().tolist())
+    chart_trend_flags = ["ALL", "True", "False"]
+
+    year_values = []
+    if "entry_date" in real_trades.columns:
+        year_values = sorted(
+            real_trades["entry_date"].dropna().dt.year.astype(int).unique().tolist()
         )
+    chart_years = ["ALL"] + [str(y) for y in year_values]
 
-        selected_label = st.selectbox("Vyber obchod", trade_selector_df["label"].tolist())
-        selected_trade = trade_selector_df.loc[trade_selector_df["label"] == selected_label].iloc[0]
+    selected_chart_ticker = f1.selectbox("Ticker", chart_tickers, key="chart_ticker")
+    selected_chart_period = f2.selectbox("Period type", chart_periods, key="chart_period")
+    selected_chart_side = f3.selectbox("Side", chart_sides, key="chart_side")
+    selected_chart_exit = f4.selectbox("Exit reason", chart_exits, key="chart_exit")
+    selected_chart_trend = f5.selectbox("Trend aligned", chart_trend_flags, key="chart_trend")
+    selected_chart_year = f6.selectbox("Year", chart_years, key="chart_year")
 
-        ticker = str(selected_trade["ticker"])
-        ohlcv = load_ohlcv(ticker)
+    g1, g2, g3, g4 = st.columns(4)
 
-        st.plotly_chart(build_trade_chart(ohlcv, selected_trade), width="stretch")
+    pnl_mode = g1.selectbox(
+        "PnL filter",
+        ["ALL", "Winners only", "Losers only"],
+        key="chart_pnl_mode",
+    )
 
-        info_cols = st.columns(6)
-        info_cols[0].metric("Ticker", ticker)
-        info_cols[1].metric("Period", str(selected_trade["period_type"]))
-        info_cols[2].metric("Side", str(selected_trade["side"]))
-        info_cols[3].metric("Exit", str(selected_trade["exit_reason"]))
-        info_cols[4].metric("PnL", f"{selected_trade['pnl_abs']:.2f}")
-        info_cols[5].metric("Hold", f"{selected_trade['bars_held']:.0f} d" if pd.notna(selected_trade["bars_held"]) else "n/a")
+    sort_by = g2.selectbox(
+        "Sort by",
+        ["entry_date", "pnl_abs", "pnl_atr", "bars_held", "ticker"],
+        key="chart_sort_by",
+    )
 
-        detail = pd.DataFrame([selected_trade.drop(labels=["label"])])
-        st.dataframe(detail, width="stretch", hide_index=True)
+    sort_order = g3.selectbox(
+        "Order",
+        ["Descending", "Ascending"],
+        key="chart_sort_order",
+    )
+
+    history_bars = int(
+        g4.slider("History bars", min_value=20, max_value=120, value=40, step=10, key="chart_history_bars")
+    )
+
+    h1, h2 = st.columns(2)
+
+    min_hold, max_hold = 0, 200
+    if "bars_held" in real_trades.columns and real_trades["bars_held"].notna().any():
+        min_hold = int(real_trades["bars_held"].min())
+        max_hold = int(real_trades["bars_held"].max())
+        if min_hold > max_hold:
+            min_hold, max_hold = 0, 200
+
+    selected_hold_range = h1.slider(
+        "Hold bars range",
+        min_value=min_hold,
+        max_value=max_hold,
+        value=(min_hold, max_hold),
+        key="chart_hold_range",
+    )
+
+    pnl_atr_series = real_trades["pnl_atr"].dropna() if "pnl_atr" in real_trades.columns else pd.Series(dtype=float)
+    if not pnl_atr_series.empty:
+        pnl_atr_min = float(pnl_atr_series.min())
+        pnl_atr_max = float(pnl_atr_series.max())
+    else:
+        pnl_atr_min, pnl_atr_max = -5.0, 5.0
+
+    selected_pnl_atr_range = h2.slider(
+        "PnL ATR range",
+        min_value=float(pnl_atr_min),
+        max_value=float(pnl_atr_max),
+        value=(float(pnl_atr_min), float(pnl_atr_max)),
+        key="chart_pnl_atr_range",
+    )
+
+    chart_filtered = real_trades.copy()
+
+    if selected_chart_ticker != "ALL":
+        chart_filtered = chart_filtered[chart_filtered["ticker"] == selected_chart_ticker]
+
+    if selected_chart_period != "ALL":
+        chart_filtered = chart_filtered[chart_filtered["period_type"] == selected_chart_period]
+
+    if selected_chart_side != "ALL":
+        chart_filtered = chart_filtered[chart_filtered["side"] == selected_chart_side]
+
+    if selected_chart_exit != "ALL":
+        chart_filtered = chart_filtered[chart_filtered["exit_reason"] == selected_chart_exit]
+
+    if selected_chart_trend != "ALL":
+        chart_filtered = chart_filtered[
+            chart_filtered["trend_aligned"].astype(str) == selected_chart_trend
+        ]
+
+    if selected_chart_year != "ALL":
+        chart_filtered = chart_filtered[
+            chart_filtered["entry_date"].dt.year.astype("Int64").astype(str) == selected_chart_year
+        ]
+
+    if pnl_mode == "Winners only":
+        chart_filtered = chart_filtered[chart_filtered["pnl_abs"] > 0]
+    elif pnl_mode == "Losers only":
+        chart_filtered = chart_filtered[chart_filtered["pnl_abs"] <= 0]
+
+    if "bars_held" in chart_filtered.columns:
+        chart_filtered = chart_filtered[
+            chart_filtered["bars_held"].fillna(-1).between(
+                selected_hold_range[0], selected_hold_range[1]
+            )
+        ]
+
+    if "pnl_atr" in chart_filtered.columns:
+        chart_filtered = chart_filtered[
+            chart_filtered["pnl_atr"].fillna(0).between(
+                selected_pnl_atr_range[0], selected_pnl_atr_range[1]
+            )
+        ]
+
+    ascending = sort_order == "Ascending"
+    chart_filtered = chart_filtered.sort_values(
+        [sort_by, "ticker"],
+        ascending=[ascending, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    st.write(f"Nalezeno obchodů pro graf: **{len(chart_filtered)}**")
+
+    if chart_filtered.empty:
+        st.warning("Žádné obchody neodpovídají zvoleným filtrům.")
+        return
+
+    chart_filtered["label"] = (
+        chart_filtered["ticker"].astype(str)
+        + " | "
+        + chart_filtered["period_type"].astype(str)
+        + " | "
+        + chart_filtered["period"].astype(str)
+        + " | "
+        + chart_filtered["side"].astype(str)
+        + " | "
+        + chart_filtered["entry_date"].dt.strftime("%Y-%m-%d")
+        + " | "
+        + chart_filtered["exit_reason"].astype(str)
+        + " | pnl="
+        + chart_filtered["pnl_abs"].round(2).astype(str)
+        + " | atr="
+        + chart_filtered["pnl_atr"].round(2).astype(str)
+    )
+
+    selected_label = st.selectbox(
+        "Vyber obchod",
+        chart_filtered["label"].tolist(),
+        key="chart_trade_select",
+    )
+
+    selected_trade = chart_filtered.loc[
+        chart_filtered["label"] == selected_label
+    ].iloc[0]
+
+    ticker = str(selected_trade["ticker"])
+    ohlcv = load_ohlcv(ticker)
+
+    st.plotly_chart(
+        build_trade_chart(ohlcv, selected_trade, history_bars=history_bars),
+        width="stretch",
+    )
+
+    info_cols = st.columns(8)
+    info_cols[0].metric("Ticker", ticker)
+    info_cols[1].metric("Period", str(selected_trade["period_type"]))
+    info_cols[2].metric("Side", str(selected_trade["side"]))
+    info_cols[3].metric("Exit", str(selected_trade["exit_reason"]))
+    info_cols[4].metric("PnL", f"{selected_trade['pnl_abs']:.2f}")
+    info_cols[5].metric(
+        "PnL ATR",
+        f"{selected_trade['pnl_atr']:.2f}" if pd.notna(selected_trade["pnl_atr"]) else "n/a"
+    )
+    info_cols[6].metric(
+        "Hold",
+        f"{selected_trade['bars_held']:.0f} d" if pd.notna(selected_trade["bars_held"]) else "n/a"
+    )
+    info_cols[7].metric(
+        "Trend aligned",
+        str(selected_trade["trend_aligned"])
+    )
+
+    detail = pd.DataFrame([selected_trade.drop(labels=["label"])])
+    st.dataframe(detail, width="stretch", hide_index=True)
 
 
 if __name__ == "__main__":
