@@ -1,69 +1,61 @@
-poc/
-├── README.md
-├── .gitignore
-├── requirements.txt
-├── config/
-│   └── settings.yaml
-├── data/
-│   ├── raw/
-│   └── processed/
-└── src/
-    ├── main.py
-    ├── config.py
-    ├── data_fetcher.py
-    ├── poc_calculator.py
-    └── utils.py
 
+### 4) docs/plan.md
 
-
-
+```bash
+cat > docs/plan.md <<'EOF'
 # Plan
 
-## Hlavní cíl
-Vytvořit Python projekt pro práci s Point of Control (POC) levely nad historickými daty.
+## Hlavní cíl projektu
 
-## Co má projekt postupně umět
-- načíst historická data z CSV
-- později načítat historická data z Interactive Brokers
-- počítat měsíční POC
-- počítat roční POC
-- určovat, zda je level stále validní
-- exportovat výsledky do CSV
-- později případně přidat automatické spuštění
+Vytvořit Python projekt pro práci s Point of Control (POC) levely nad historickými daty tak, aby šel použít pro:
 
-## Doporučené pořadí vývoje
+- vizuální analýzu levelů
+- filtrování validních levelů
+- historický backtest návratů k POC
+- pozdější automatizaci
 
-### Fáze 1 – základ projektu
-- vytvořit strukturu projektu
-- připravit config
-- ověřit spuštění programu
+## Co už projekt umí
 
-### Fáze 2 – načítání a čištění CSV
-- načítat data ze souborů CSV
-- kontrolovat povinné sloupce
-- převést datum na správný formát
-- seřadit data podle data
+- načítat historická data z CSV
+- počítat POC levely
+- exportovat levely do CSV
+- obohacovat levely o další kontext
+- zobrazovat levely v dashboardu
+- provádět historický backtest
+- zobrazovat backtest obchody v dashboardu
 
-### Fáze 3 – výpočet POC
-- spočítat první měsíční POC
-- spočítat první roční POC
-- umět vrátit poslední 3 měsíční POC
-- umět vrátit poslední 3 roční POC
+## Aktuální vývojová fáze
 
-### Fáze 4 – validita levelů
-- level platí do prvního dotyku nebo průrazu cenou
-- po zásahu se level označí jako neplatný
+### Fáze 1 — hotovo
+- struktura projektu
+- načítání a čištění CSV
+- základní výpočet POC
+- export levelů
 
-### Fáze 5 – export výsledků
-- uložit výsledné levely do CSV
-- připravit výstup pro další použití
+### Fáze 2 — hotovo
+- enrichment logika nad levely
+- základní validace levelů
+- dashboard pro ruční kontrolu
 
-### Fáze 6 – napojení na IB
-- připojení k TWS / IB Gateway
-- stažení historických dat
-- uložení do lokálních souborů
-- použití stejné POC logiky jako pro CSV
+### Fáze 3 — rozpracováno
+- realističtější backtest vstupů
+- departure threshold
+- clean touch
+- gap-cross invalidace
+- rotation invalidace
 
-## Poznámka k vývoji
-Nejdřív budeme ladit logiku na CSV datech.
-Napojení na IB přijde až ve chvíli, kdy bude výpočet POC fungovat správně.
+### Fáze 4 — další krok
+- zpřísnění parametrů validního návratu
+- lepší konfigurace parametrů
+- další vizuální validace v dashboardu
+
+### Fáze 5 — později
+- oddělení parametrů do samostatného configu
+- lepší reporting
+- případné napojení na další datové zdroje
+
+## Praktický směr
+
+Nejdřív chceme doladit logiku nad lokálními CSV daty.  
+Teprve potom dává smysl řešit další automatizaci nebo nové zdroje dat.
+EOF
