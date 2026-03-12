@@ -31,34 +31,111 @@ EMA_SLOW = 200
 INCLUDE_PERIODS = ("weekly", "monthly", "yearly")
 MIN_LEVEL_AGE_BARS = 3
 
-ENTRY_BUFFER_ATR = 0.30
 
-PERIOD_PARAMS = {
-    "weekly": {
-        "stop_atr": 1.5,
-        "target_atr": 2.0,
-        "max_hold_bars": 20,
-        "require_departure": True,
-        "activation_threshold_mode": "atr",
-        "activation_threshold_value": 3.00,
+# ============================================================
+# Backtest preset configuration
+# ============================================================
+
+ENTRY_BUFFER_ATR = 0.20
+BACKTEST_PRESET = "balanced"
+
+PRESET_LIBRARY = {
+    "loose": {
+        "weekly": {
+            "stop_atr": 1.3,
+            "target_atr": 1.8,
+            "max_hold_bars": 16,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 2.40,
+        },
+        "monthly": {
+            "stop_atr": 1.8,
+            "target_atr": 2.7,
+            "max_hold_bars": 28,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 2.70,
+        },
+        "yearly": {
+            "stop_atr": 2.7,
+            "target_atr": 4.0,
+            "max_hold_bars": 50,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 4.50,
+        },
     },
-    "monthly": {
-        "stop_atr": 2.0,
-        "target_atr": 3.0,
-        "max_hold_bars": 35,
-        "require_departure": True,
-        "activation_threshold_mode": "atr",
-        "activation_threshold_value": 3.30,
+
+    "balanced": {
+        "weekly": {
+            "stop_atr": 1.5,
+            "target_atr": 2.0,
+            "max_hold_bars": 20,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 3.00,
+        },
+        "monthly": {
+            "stop_atr": 2.0,
+            "target_atr": 3.0,
+            "max_hold_bars": 35,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 3.30,
+        },
+        "yearly": {
+            "stop_atr": 3.0,
+            "target_atr": 4.5,
+            "max_hold_bars": 60,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 5.5,
+        },
     },
-    "yearly": {
-        "stop_atr": 3.0,
-        "target_atr": 4.5,
-        "max_hold_bars": 60,
-        "require_departure": True,
-        "activation_threshold_mode": "atr",
-        "activation_threshold_value": 5.5,
+
+    "strict": {
+        "weekly": {
+            "stop_atr": 1.7,
+            "target_atr": 2.3,
+            "max_hold_bars": 24,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 3.60,
+        },
+        "monthly": {
+            "stop_atr": 2.3,
+            "target_atr": 3.5,
+            "max_hold_bars": 42,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 4.00,
+        },
+        "yearly": {
+            "stop_atr": 3.5,
+            "target_atr": 5.2,
+            "max_hold_bars": 75,
+            "require_departure": True,
+            "activation_threshold_mode": "atr",
+            "activation_threshold_value": 6.50,
+        },
     },
 }
+
+if BACKTEST_PRESET not in PRESET_LIBRARY:
+    raise ValueError(f"Unknown BACKTEST_PRESET: {BACKTEST_PRESET}")
+
+PERIOD_PARAMS = PRESET_LIBRARY[BACKTEST_PRESET]
+
+print(f"Using backtest preset: {BACKTEST_PRESET}")
+print(f"ENTRY_BUFFER_ATR: {ENTRY_BUFFER_ATR}")
+
+if BACKTEST_PRESET not in PRESET_LIBRARY:
+    raise ValueError(f"Unknown BACKTEST_PRESET: {BACKTEST_PRESET}")
+
+PERIOD_PARAMS = PRESET_LIBRARY[BACKTEST_PRESET]
+
+print(f"Using backtest preset: {BACKTEST_PRESET}")
 
 AMBIGUOUS_EXIT = "ambiguous"
 
