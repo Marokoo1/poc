@@ -1,59 +1,58 @@
-Plan na příště
-Cíl další session
 
-!!! DASBORD se NESPOUSTI SAM PO CALCULATOR.py !!!
+### 3) docs/next_steps.md
 
-Napojit poc_dashboard.py na nový soubor data/processed/poc_levels_enriched.csv a začít používat enriched POC levely místo původního jednoduchého přehledu.
+```bash
+cat > docs/next_steps.md <<'EOF'
+# Plan na příště
 
-Konkrétní kroky
+## Hlavní cíl
 
-Upravit poc_dashboard.py, aby četl poc_levels_enriched.csv.
+Doladit parametry a prezentaci backtestu tak, aby obchody lépe odpovídaly tomu, co je vidět v grafu.
 
-Přidat do dashboardu nové sloupce:
+## Co už je hotové
 
-Ticker
+- backtest běží
+- dashboard pro backtest běží
+- přidán departure threshold
+- přidán gap-cross filtr
+- přidán rotation filtr
+- výrazně ubyly slepé vstupy přímo na POC
 
-PeriodType
+## Priorita pro další session
 
-Period
+### 1. Zpřísnit validitu levelu
+- zvýšit minimální odchod ceny od POC
+- otestovat výrazně vyšší `activation_threshold_value`
+- porovnat weekly / monthly / yearly zvlášť
 
-POC
+### 2. Upravovat parametry na jednom místě
+- sjednotit nastavení:
+  - departure threshold
+  - SL
+  - TP
+  - max hold bars
+- držet vše přehledně v `PERIOD_PARAMS`
+- případně později přesunout do samostatného configu
 
-LevelSide
+### 3. Projít problematické obchody v dashboardu
+- najít další případy, které pořád nevypadají realisticky
+- ověřit, zda nejde o:
+  - příliš malý departure threshold
+  - stále moc volný clean touch
+  - příliš krátký nebo příliš těsný trade management
 
-IsTested
+### 4. Zlepšit dashboard
+- zobrazit jasněji důvod neotevření levelu:
+  - `no_departure`
+  - `gap_cross`
+  - `rotation`
+  - `no_touch`
+- přidat lepší filtrování podle `exit_reason`
 
-ValidNow
+## Konkrétní první krok příště
 
-DistanceATR
-
-TrendContext
-
-Score
-
-Přidat filtry:
-
-pouze ValidNow == True
-
-weekly / monthly
-
-long / short
-
-Seřazení:
-
-podle Score
-
-nebo podle absolutní hodnoty DistanceATR
-
-Vizuálně zkontrolovat několik tickerů:
-
-jestli IsTested dává smysl proti grafu
-
-jestli ValidNow odpovídá realitě
-
-Teprve potom začít řešit poc_backtest.py.
-
-Priorita
-
-Nejdřív vizualizace a kontrola logiky.
-Backtest až po potvrzení, že enriched levely sedí.
+1. otevřít `src/poc_backtest.py`
+2. zvýšit parametry v `PERIOD_PARAMS`
+3. znovu spustit:
+   ```bash
+   python3 src/poc_backtest.py
