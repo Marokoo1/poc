@@ -524,6 +524,7 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     period = str(level_row["Period"])
     level = float(level_row["POC"])
     active_from = pd.Timestamp(level_row["ActiveFrom"])
+    valid_until = pd.to_datetime(level_row.get("ValidUntil"), errors="coerce")
 
     params = get_period_params(period_type)
     stop_atr = float(params["stop_atr"])
@@ -564,6 +565,10 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     trend_context = str(activation_row["TrendContext"]).lower()
 
     future = ohlcv.iloc[search_idx:].copy()
+    
+    if pd.notna(valid_until):
+        future = future[future["Date"] < valid_until].copy()
+        
     if future.empty:
         return make_empty_trade_result(
             ticker=ticker,
@@ -1000,12 +1005,13 @@ def main() -> None:
             print(f"  ⚠️ Nevznikly žádné historické levely")
             continue
 
+        levels = apply_level_supersession(levels, ohlcv)
+
         all_levels.append(levels)
 
         for _, level_row in levels.iterrows():
             result = simulate_single_level(level_row, ohlcv)
             all_results.append(asdict(result))
-
         print(f"  ✅ Historických levelů: {len(levels)}")
 
     if not all_results:
