@@ -830,9 +830,42 @@ def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> p
     return out
 
 
+def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
+    if trades.empty:
+        return pd.DataFrame()
+
+    df = trades.copy()
+    df = df[df["entry_date"].notna()].copy()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["win"] = df["pnl_abs"] > 0
+
+    summary = (
+        df.groupby(["period_type", "side", "trend_aligned"], dropna=False, observed=False)
+        .agg(
+            trades=("ticker", "count"),
+            win_rate=("win", "mean"),
+            avg_pnl_abs=("pnl_abs", "mean"),
+            median_pnl_abs=("pnl_abs", "median"),
+            avg_pnl_atr=("pnl_atr", "mean"),
+            avg_return_pct=("return_pct", "mean"),
+            median_return_pct=("return_pct", "median"),
+            avg_mfe=("mfe_abs", "mean"),
+            avg_mae=("mae_abs", "mean"),
+            avg_bars_held=("bars_held", "mean"),
+        )
+        .reset_index()
+    )
+
+    summary["win_rate"] = (summary["win_rate"] * 100).round(2)
+    return summary
+
 # ============================================================
 # MAIN
 # ============================================================
+
 def main() -> None:
     raw_files = sorted(RAW_DIR.glob("*.csv"))
     if not raw_files:
