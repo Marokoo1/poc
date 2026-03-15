@@ -39,9 +39,9 @@ MIN_LEVEL_AGE_BARS = 3
 SUPERSESSION_ENABLED = True
 
 SUPERSESSION_THRESHOLD_ATR = {
-    "weekly": 0.75,
-    "monthly": 1.00,
-    "yearly": 1.25,
+    "weekly": 2.00,
+    "monthly": 2.00,
+    "yearly": 3.00,
 }
 
 
