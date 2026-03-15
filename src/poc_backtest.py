@@ -776,32 +776,22 @@ def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> p
         return df
 
     entered["entry_date"] = pd.to_datetime(entered["entry_date"], errors="coerce")
-    entered["active_from_dt"] = pd.to_datetime(entered["active_from"], errors="coerce")
 
+    # Tvrdá priorita timeframe:
+    # yearly > monthly > weekly
     period_priority = {"yearly": 0, "monthly": 1, "weekly": 2}
     entered["period_priority"] = entered["period_type"].map(period_priority).fillna(999)
 
     entered = entered.sort_values(
-        ["ticker", "entry_date", "period_priority", "active_from_dt", "level_price"],
-        ascending=[True, True, True, True, True],
+        ["ticker", "entry_date", "period_priority"],
+        ascending=[True, True, True],
     ).copy()
 
-    # Limit aplikujeme jen na weekly + monthly.
-    # Yearly necháváme mimo denní limit.
-    limit_scope_mask = entered["period_type"].isin(["weekly", "monthly"])
-
-    entered["entry_rank_in_day"] = np.nan
-    entered.loc[limit_scope_mask, "entry_rank_in_day"] = (
-        entered.loc[limit_scope_mask]
-        .groupby(["ticker", "entry_date"])
-        .cumcount() + 1
+    entered["entry_rank_in_day"] = (
+        entered.groupby(["ticker", "entry_date"]).cumcount() + 1
     )
 
-    over_limit_mask = (
-        limit_scope_mask
-        & entered["entry_rank_in_day"].notna()
-        & (entered["entry_rank_in_day"] > max_entries_per_day)
-    )
+    over_limit_mask = entered["entry_rank_in_day"] > max_entries_per_day
 
     if over_limit_mask.any():
         cols_to_null = [
@@ -827,7 +817,7 @@ def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> p
         entered.loc[over_limit_mask, "exit_reason"] = DAILY_LIMIT_EXIT_REASON
 
     entered = entered.drop(
-        columns=["entry_rank_in_day", "active_from_dt", "period_priority"],
+        columns=["entry_rank_in_day", "period_priority"],
         errors="ignore",
     )
 
@@ -838,39 +828,6 @@ def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> p
     ).reset_index(drop=True)
 
     return out
-
-
-def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
-    if trades.empty:
-        return pd.DataFrame()
-
-    df = trades.copy()
-    df = df[df["entry_date"].notna()].copy()
-
-    if df.empty:
-        return pd.DataFrame()
-
-    df["win"] = df["pnl_abs"] > 0
-
-    summary = (
-        df.groupby(["period_type", "side", "trend_aligned"], dropna=False, observed=False)
-        .agg(
-            trades=("ticker", "count"),
-            win_rate=("win", "mean"),
-            avg_pnl_abs=("pnl_abs", "mean"),
-            median_pnl_abs=("pnl_abs", "median"),
-            avg_pnl_atr=("pnl_atr", "mean"),
-            avg_return_pct=("return_pct", "mean"),
-            median_return_pct=("return_pct", "median"),
-            avg_mfe=("mfe_abs", "mean"),
-            avg_mae=("mae_abs", "mean"),
-            avg_bars_held=("bars_held", "mean"),
-        )
-        .reset_index()
-    )
-
-    summary["win_rate"] = (summary["win_rate"] * 100).round(2)
-    return summary
 
 
 # ============================================================
