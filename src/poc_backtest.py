@@ -139,6 +139,11 @@ print(f"Using backtest preset: {BACKTEST_PRESET}")
 
 AMBIGUOUS_EXIT = "ambiguous"
 
+FIRST_TOUCH_ONLY = True
+MAX_ENTRIES_PER_TICKER_PER_DAY = 1
+DAILY_LIMIT_EXIT_REASON = "daily_limit"
+FIRST_TOUCH_INVALID_EXIT_REASON = "first_touch_invalid"
+
 # ============================================================
 # DATA MODEL
 # ============================================================
@@ -276,6 +281,51 @@ def is_trend_aligned(side: str, trend_context: str) -> bool:
         side == "short" and trend_context == "down"
     )
 
+def make_empty_trade_result(
+    *,
+    ticker: str,
+    period_type: str,
+    period: str,
+    level: float,
+    side: str,
+    active_from: pd.Timestamp,
+    trend_context: str,
+    exit_reason: str,
+) -> TradeResult:
+    return TradeResult(
+        ticker=ticker,
+        period_type=period_type,
+        period=period,
+        level_price=level,
+        side=side,
+        active_from=active_from.date().isoformat(),
+        touch_date=None,
+        entry_date=None,
+        exit_date=None,
+        entry_price=None,
+        exit_price=None,
+        stop_price=None,
+        target_price=None,
+        trend_context=trend_context,
+        trend_aligned=False,
+        exit_reason=exit_reason,
+        bars_held=None,
+        pnl_abs=None,
+        pnl_atr=None,
+        return_pct=None,
+        mfe_abs=None,
+        mae_abs=None,
+    )
+
+
+def touches_level_zone(bar: pd.Series, level: float, atr: float) -> bool:
+    buffer_abs = ENTRY_BUFFER_ATR * float(atr)
+    bar_high = float(bar["High"])
+    bar_low = float(bar["Low"])
+    return bar_low <= (level + buffer_abs) and bar_high >= (level - buffer_abs)
+
+
+
 
 def detect_clean_touch(prev_bar: pd.Series, bar: pd.Series, level: float, atr: float) -> str | None:
     buffer_abs = ENTRY_BUFFER_ATR * atr
@@ -375,56 +425,28 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
 
     start_idx = get_first_row_on_or_after(ohlcv, active_from)
     if start_idx is None:
-        return TradeResult(
+        return make_empty_trade_result(
             ticker=ticker,
             period_type=period_type,
             period=period,
-            level_price=level,
+            level=level,
             side="unknown",
-            active_from=active_from.date().isoformat(),
-            touch_date=None,
-            entry_date=None,
-            exit_date=None,
-            entry_price=None,
-            exit_price=None,
-            stop_price=None,
-            target_price=None,
+            active_from=active_from,
             trend_context="unknown",
-            trend_aligned=False,
             exit_reason="no_data_after_active_from",
-            bars_held=None,
-            pnl_abs=None,
-            pnl_atr=None,
-            return_pct=None,
-            mfe_abs=None,
-            mae_abs=None,
         )
 
     search_idx = start_idx + MIN_LEVEL_AGE_BARS
     if search_idx >= len(ohlcv):
-        return TradeResult(
+        return make_empty_trade_result(
             ticker=ticker,
             period_type=period_type,
             period=period,
-            level_price=level,
+            level=level,
             side="unknown",
-            active_from=active_from.date().isoformat(),
-            touch_date=None,
-            entry_date=None,
-            exit_date=None,
-            entry_price=None,
-            exit_price=None,
-            stop_price=None,
-            target_price=None,
+            active_from=active_from,
             trend_context="unknown",
-            trend_aligned=False,
-            exit_reason="not_enough_future_bars",
-            bars_held=None,
-            pnl_abs=None,
-            pnl_atr=None,
-            return_pct=None,
-            mfe_abs=None,
-            mae_abs=None,
+            exit_reason="not_enough_bars_after_active_from",
         )
 
     activation_row = ohlcv.iloc[start_idx]
@@ -432,6 +454,17 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     trend_context = str(activation_row["TrendContext"]).lower()
 
     future = ohlcv.iloc[search_idx:].copy()
+    if future.empty:
+        return make_empty_trade_result(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level=level,
+            side=initial_side,
+            active_from=active_from,
+            trend_context=trend_context,
+            exit_reason="no_future_bars",
+        )
 
     entry_search_start = 0
 
@@ -457,34 +490,26 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
                 break
 
         if armed_index is None or armed_index >= len(future):
-            return TradeResult(
+            return make_empty_trade_result(
                 ticker=ticker,
                 period_type=period_type,
                 period=period,
-                level_price=level,
+                level=level,
                 side=initial_side,
-                active_from=active_from.date().isoformat(),
-                touch_date=None,
-                entry_date=None,
-                exit_date=None,
-                entry_price=None,
-                exit_price=None,
-                stop_price=None,
-                target_price=None,
+                active_from=active_from,
                 trend_context=trend_context,
-                trend_aligned=False,
                 exit_reason="no_departure",
-                bars_held=None,
-                pnl_abs=None,
-                pnl_atr=None,
-                return_pct=None,
-                mfe_abs=None,
-                mae_abs=None,
             )
 
         entry_search_start = armed_index
 
-    rotation_count = 0
+    # ============================================================
+    # FIRST TOUCH ONLY:
+    # po departure bereme pouze první návrat ceny do level zóny
+    # ============================================================
+    first_touch_idx = None
+    first_touch_bar = None
+    first_touch_atr = None
 
     for i in range(entry_search_start, len(future)):
         touch_bar = future.iloc[i]
@@ -493,206 +518,112 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
         if pd.isna(atr) or atr <= 0:
             continue
 
-        if i == 0:
-            if entry_search_start == 0:
-                continue
-            prev_bar = future.iloc[entry_search_start - 1]
-        else:
-            prev_bar = future.iloc[i - 1]
+        if touches_level_zone(touch_bar, level, float(atr)):
+            first_touch_idx = i
+            first_touch_bar = touch_bar
+            first_touch_atr = float(atr)
+            break
 
-        touch_signal = detect_clean_touch(prev_bar, touch_bar, level, float(atr))
+    if first_touch_idx is None or first_touch_bar is None or first_touch_atr is None:
+        return make_empty_trade_result(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level=level,
+            side=initial_side,
+            active_from=active_from,
+            trend_context=trend_context,
+            exit_reason="no_touch",
+        )
 
-        if touch_signal == "gap_cross":
-            return TradeResult(
+    if first_touch_idx == 0:
+        if entry_search_start == 0:
+            return make_empty_trade_result(
                 ticker=ticker,
                 period_type=period_type,
                 period=period,
-                level_price=level,
+                level=level,
                 side=initial_side,
-                active_from=active_from.date().isoformat(),
-                touch_date=None,
-                entry_date=None,
-                exit_date=None,
-                entry_price=None,
-                exit_price=None,
-                stop_price=None,
-                target_price=None,
+                active_from=active_from,
                 trend_context=trend_context,
-                trend_aligned=False,
-                exit_reason="gap_cross",
-                bars_held=None,
-                pnl_abs=None,
-                pnl_atr=None,
-                return_pct=None,
-                mfe_abs=None,
-                mae_abs=None,
+                exit_reason=FIRST_TOUCH_INVALID_EXIT_REASON,
             )
+        prev_bar = future.iloc[entry_search_start - 1]
+    else:
+        prev_bar = future.iloc[first_touch_idx - 1]
 
-        if touch_signal == "rotation":
-            rotation_count += 1
-            if rotation_count >= 1:
-                return TradeResult(
-                    ticker=ticker,
-                    period_type=period_type,
-                    period=period,
-                    level_price=level,
-                    side=initial_side,
-                    active_from=active_from.date().isoformat(),
-                    touch_date=None,
-                    entry_date=None,
-                    exit_date=None,
-                    entry_price=None,
-                    exit_price=None,
-                    stop_price=None,
-                    target_price=None,
-                    trend_context=trend_context,
-                    trend_aligned=False,
-                    exit_reason="rotation",
-                    bars_held=None,
-                    pnl_abs=None,
-                    pnl_atr=None,
-                    return_pct=None,
-                    mfe_abs=None,
-                    mae_abs=None,
-                )
-            continue
+    touch_signal = detect_clean_touch(prev_bar, first_touch_bar, level, first_touch_atr)
 
-        if touch_signal not in {"long", "short"}:
-            continue
+    if touch_signal == "gap_cross":
+        return make_empty_trade_result(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level=level,
+            side=initial_side,
+            active_from=active_from,
+            trend_context=trend_context,
+            exit_reason="gap_cross",
+        )
 
-        side = touch_signal
-        trend_aligned = is_trend_aligned(side, trend_context)
+    if touch_signal == "rotation":
+        return make_empty_trade_result(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level=level,
+            side=initial_side,
+            active_from=active_from,
+            trend_context=trend_context,
+            exit_reason="rotation",
+        )
 
-        touch_date = pd.Timestamp(touch_bar["Date"])
-        entry_date = touch_date
-        entry_price = level
+    if touch_signal not in {"long", "short"}:
+        return make_empty_trade_result(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level=level,
+            side=initial_side,
+            active_from=active_from,
+            trend_context=trend_context,
+            exit_reason=FIRST_TOUCH_INVALID_EXIT_REASON,
+        )
 
-        if side == "long":
-            stop_price = entry_price - stop_atr * float(atr)
-            target_price = entry_price + target_atr * float(atr)
-        else:
-            stop_price = entry_price + stop_atr * float(atr)
-            target_price = entry_price - target_atr * float(atr)
+    side = touch_signal
+    trend_aligned = is_trend_aligned(side, trend_context)
 
-        # Den vstupu:
-        # - SL může být zasažen hned
-        # - PT ve stejný den IGNORUJEME
-        touch_high = float(touch_bar["High"])
-        touch_low = float(touch_bar["Low"])
+    touch_date = pd.Timestamp(first_touch_bar["Date"])
+    entry_date = touch_date
+    entry_price = level
+    atr = first_touch_atr
+    i = first_touch_idx
 
-        if side == "long":
-            same_day_stop_hit = touch_low <= stop_price
-        else:
-            same_day_stop_hit = touch_high >= stop_price
+    if side == "long":
+        stop_price = entry_price - stop_atr * atr
+        target_price = entry_price + target_atr * atr
+    else:
+        stop_price = entry_price + stop_atr * atr
+        target_price = entry_price - target_atr * atr
 
-        if same_day_stop_hit:
-            pnl_abs = (stop_price - entry_price) if side == "long" else (entry_price - stop_price)
-            pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
-            return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
+    # Den vstupu:
+    # - SL může být zasažen hned
+    # - PT ve stejný den ignorujeme
+    touch_high = float(first_touch_bar["High"])
+    touch_low = float(first_touch_bar["Low"])
 
-            held_window = future.iloc[i : i + 1].copy()
-            mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+    if side == "long":
+        same_day_stop_hit = touch_low <= stop_price
+    else:
+        same_day_stop_hit = touch_high >= stop_price
 
-            return TradeResult(
-                ticker=ticker,
-                period_type=period_type,
-                period=period,
-                level_price=level,
-                side=side,
-                active_from=active_from.date().isoformat(),
-                touch_date=touch_date.date().isoformat(),
-                entry_date=entry_date.date().isoformat(),
-                exit_date=touch_date.date().isoformat(),
-                entry_price=round(entry_price, 6),
-                exit_price=round(float(stop_price), 6),
-                stop_price=round(stop_price, 6),
-                target_price=round(target_price, 6),
-                trend_context=trend_context,
-                trend_aligned=trend_aligned,
-                exit_reason="stop",
-                bars_held=0,
-                pnl_abs=round(float(pnl_abs), 6),
-                pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
-                return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
-                mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
-                mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
-            )
-
-        # Od dalšího dne už sledujeme normálně SL i PT
-        post_entry_window = future.iloc[i + 1 : i + 1 + max_hold_bars].copy()
-
-        if post_entry_window.empty:
-            held_window = future.iloc[i : i + 1].copy()
-            mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
-
-            return TradeResult(
-                ticker=ticker,
-                period_type=period_type,
-                period=period,
-                level_price=level,
-                side=side,
-                active_from=active_from.date().isoformat(),
-                touch_date=touch_date.date().isoformat(),
-                entry_date=entry_date.date().isoformat(),
-                exit_date=touch_date.date().isoformat(),
-                entry_price=round(entry_price, 6),
-                exit_price=round(float(touch_bar["Close"]), 6),
-                stop_price=round(stop_price, 6),
-                target_price=round(target_price, 6),
-                trend_context=trend_context,
-                trend_aligned=trend_aligned,
-                exit_reason="time",
-                bars_held=0,
-                pnl_abs=round(float((float(touch_bar["Close"]) - entry_price) if side == "long" else (entry_price - float(touch_bar["Close"]))), 6),
-                pnl_atr=np.nan,
-                return_pct=round(float((((float(touch_bar["Close"]) - entry_price) if side == "long" else (entry_price - float(touch_bar["Close"]))) / entry_price) * 100), 6),
-                mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
-                mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
-            )
-
-        exit_reason = "time"
-        last_bar = post_entry_window.iloc[-1]
-        exit_date = pd.Timestamp(last_bar["Date"])
-        exit_price = float(last_bar["Close"])
-
-        for j in range(len(post_entry_window)):
-            row = post_entry_window.iloc[j]
-            dt = pd.Timestamp(row["Date"])
-            high = float(row["High"])
-            low = float(row["Low"])
-
-            if side == "long":
-                hit_stop = low <= stop_price
-                hit_target = high >= target_price
-            else:
-                hit_stop = high >= stop_price
-                hit_target = low <= target_price
-
-            if hit_stop and hit_target:
-                exit_reason = "stop"
-                exit_date = dt
-                exit_price = stop_price
-                break
-            elif hit_stop:
-                exit_reason = "stop"
-                exit_date = dt
-                exit_price = stop_price
-                break
-            elif hit_target:
-                exit_reason = "target"
-                exit_date = dt
-                exit_price = target_price
-                break
-
-        held_window = future.iloc[i:].copy()
-        held_window = held_window.loc[held_window["Date"] <= exit_date]
-        mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
-
-        pnl_abs = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-        pnl_atr = pnl_abs / float(atr) if atr > 0 else np.nan
+    if same_day_stop_hit:
+        pnl_abs = (stop_price - entry_price) if side == "long" else (entry_price - stop_price)
+        pnl_atr = pnl_abs / atr if atr > 0 else np.nan
         return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
 
-        bars_held = max((exit_date - entry_date).days, 0)
+        held_window = future.iloc[i : i + 1].copy()
+        mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
 
         return TradeResult(
             ticker=ticker,
@@ -703,15 +634,15 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
             active_from=active_from.date().isoformat(),
             touch_date=touch_date.date().isoformat(),
             entry_date=entry_date.date().isoformat(),
-            exit_date=exit_date.date().isoformat(),
+            exit_date=touch_date.date().isoformat(),
             entry_price=round(entry_price, 6),
-            exit_price=round(float(exit_price), 6),
+            exit_price=round(float(stop_price), 6),
             stop_price=round(stop_price, 6),
             target_price=round(target_price, 6),
             trend_context=trend_context,
             trend_aligned=trend_aligned,
-            exit_reason=exit_reason,
-            bars_held=bars_held,
+            exit_reason="stop",
+            bars_held=0,
             pnl_abs=round(float(pnl_abs), 6),
             pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
             return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
@@ -719,30 +650,177 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
             mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
         )
 
+    # Od dalšího dne už sledujeme normálně SL i PT
+    post_entry_window = future.iloc[i + 1 : i + 1 + max_hold_bars].copy()
+
+    if post_entry_window.empty:
+        held_window = future.iloc[i : i + 1].copy()
+        mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+
+        close_px = float(first_touch_bar["Close"])
+        pnl_abs = (close_px - entry_price) if side == "long" else (entry_price - close_px)
+        return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
+
+        return TradeResult(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level_price=level,
+            side=side,
+            active_from=active_from.date().isoformat(),
+            touch_date=touch_date.date().isoformat(),
+            entry_date=entry_date.date().isoformat(),
+            exit_date=touch_date.date().isoformat(),
+            entry_price=round(entry_price, 6),
+            exit_price=round(close_px, 6),
+            stop_price=round(stop_price, 6),
+            target_price=round(target_price, 6),
+            trend_context=trend_context,
+            trend_aligned=trend_aligned,
+            exit_reason="time",
+            bars_held=0,
+            pnl_abs=round(float(pnl_abs), 6),
+            pnl_atr=np.nan,
+            return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
+            mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+            mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
+        )
+
+    exit_reason = "time"
+    last_bar = post_entry_window.iloc[-1]
+    exit_date = pd.Timestamp(last_bar["Date"])
+    exit_price = float(last_bar["Close"])
+
+    for j in range(len(post_entry_window)):
+        row = post_entry_window.iloc[j]
+        dt = pd.Timestamp(row["Date"])
+        high = float(row["High"])
+        low = float(row["Low"])
+
+        if side == "long":
+            hit_stop = low <= stop_price
+            hit_target = high >= target_price
+        else:
+            hit_stop = high >= stop_price
+            hit_target = low <= target_price
+
+        if hit_stop and hit_target:
+            exit_reason = "stop"
+            exit_date = dt
+            exit_price = stop_price
+            break
+        elif hit_stop:
+            exit_reason = "stop"
+            exit_date = dt
+            exit_price = stop_price
+            break
+        elif hit_target:
+            exit_reason = "target"
+            exit_date = dt
+            exit_price = target_price
+            break
+
+    held_window = future.iloc[i:].copy()
+    held_window = held_window.loc[held_window["Date"] <= exit_date]
+    mfe_abs, mae_abs = compute_mfe_mae(held_window, entry_price, side)
+
+    pnl_abs = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+    pnl_atr = pnl_abs / atr if atr > 0 else np.nan
+    return_pct = (pnl_abs / entry_price) * 100 if entry_price else np.nan
+    bars_held = max((exit_date - entry_date).days, 0)
+
     return TradeResult(
         ticker=ticker,
         period_type=period_type,
         period=period,
         level_price=level,
-        side=initial_side,
+        side=side,
         active_from=active_from.date().isoformat(),
-        touch_date=None,
-        entry_date=None,
-        exit_date=None,
-        entry_price=None,
-        exit_price=None,
-        stop_price=None,
-        target_price=None,
+        touch_date=touch_date.date().isoformat(),
+        entry_date=entry_date.date().isoformat(),
+        exit_date=exit_date.date().isoformat(),
+        entry_price=round(entry_price, 6),
+        exit_price=round(float(exit_price), 6),
+        stop_price=round(stop_price, 6),
+        target_price=round(target_price, 6),
         trend_context=trend_context,
-        trend_aligned=False,
-        exit_reason="no_touch",
-        bars_held=None,
-        pnl_abs=None,
-        pnl_atr=None,
-        return_pct=None,
-        mfe_abs=None,
-        mae_abs=None,
+        trend_aligned=trend_aligned,
+        exit_reason=exit_reason,
+        bars_held=bars_held,
+        pnl_abs=round(float(pnl_abs), 6),
+        pnl_atr=round(float(pnl_atr), 6) if pd.notna(pnl_atr) else np.nan,
+        return_pct=round(float(return_pct), 6) if pd.notna(return_pct) else np.nan,
+        mfe_abs=round(float(mfe_abs), 6) if pd.notna(mfe_abs) else np.nan,
+        mae_abs=round(float(mae_abs), 6) if pd.notna(mae_abs) else np.nan,
     )
+
+
+def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> pd.DataFrame:
+    if trades.empty or max_entries_per_day <= 0:
+        return trades
+
+    df = trades.copy()
+
+    if "entry_date" not in df.columns:
+        return df
+
+    entered_mask = df["entry_date"].notna()
+    entered = df.loc[entered_mask].copy()
+    skipped = df.loc[~entered_mask].copy()
+
+    if entered.empty:
+        return df
+
+    entered["entry_date"] = pd.to_datetime(entered["entry_date"], errors="coerce")
+    entered["active_from_dt"] = pd.to_datetime(entered["active_from"], errors="coerce")
+
+    period_priority = {"yearly": 0, "monthly": 1, "weekly": 2}
+    entered["period_priority"] = entered["period_type"].map(period_priority).fillna(999)
+
+    entered = entered.sort_values(
+        ["ticker", "entry_date", "active_from_dt", "period_priority", "level_price"],
+        ascending=[True, True, True, True, True],
+    ).copy()
+
+    entered["entry_rank_in_day"] = entered.groupby(["ticker", "entry_date"]).cumcount() + 1
+
+    over_limit_mask = entered["entry_rank_in_day"] > max_entries_per_day
+
+    if over_limit_mask.any():
+        cols_to_null = [
+            "touch_date",
+            "entry_date",
+            "exit_date",
+            "entry_price",
+            "exit_price",
+            "stop_price",
+            "target_price",
+            "bars_held",
+            "pnl_abs",
+            "pnl_atr",
+            "return_pct",
+            "mfe_abs",
+            "mae_abs",
+        ]
+        for col in cols_to_null:
+            if col in entered.columns:
+                entered.loc[over_limit_mask, col] = np.nan
+
+        entered.loc[over_limit_mask, "trend_aligned"] = False
+        entered.loc[over_limit_mask, "exit_reason"] = DAILY_LIMIT_EXIT_REASON
+
+    entered = entered.drop(
+        columns=["entry_rank_in_day", "active_from_dt", "period_priority"],
+        errors="ignore",
+    )
+
+    out = pd.concat([entered, skipped], ignore_index=True)
+    out = out.sort_values(
+        ["ticker", "active_from", "period_type", "period"],
+        ascending=[True, True, True, True],
+    ).reset_index(drop=True)
+
+    return out
 
 
 def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
