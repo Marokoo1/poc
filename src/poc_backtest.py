@@ -28,7 +28,7 @@ ATR_PERIOD = 14
 EMA_FAST = 50
 EMA_SLOW = 200
 
-INCLUDE_PERIODS = ("weekly", "monthly", "yearly")
+INCLUDE_PERIODS = ( "monthly", "yearly") #"weekly",
 MIN_LEVEL_AGE_BARS = 3
 
 
