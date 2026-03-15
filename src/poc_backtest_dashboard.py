@@ -396,7 +396,56 @@ def plot_equity_by_period(equity_period_df: pd.DataFrame) -> go.Figure:
     )
     return fig
     
+def filter_trades_for_analysis(
+    trades: pd.DataFrame,
+    ticker: str = "ALL",
+    period_type: str = "ALL",
+    side: str = "ALL",
+    exit_reason: str = "ALL",
+    trend_aligned: str = "ALL",
+    year: str = "ALL",
+    pnl_mode: str = "ALL",
+    hold_range: tuple[int, int] | None = None,
+    pnl_atr_range: tuple[float, float] | None = None,
+) -> pd.DataFrame:
+    df = trades.copy()
 
+    if ticker != "ALL":
+        df = df[df["ticker"] == ticker]
+
+    if period_type != "ALL":
+        df = df[df["period_type"] == period_type]
+
+    if side != "ALL":
+        df = df[df["side"] == side]
+
+    if exit_reason != "ALL":
+        df = df[df["exit_reason"] == exit_reason]
+
+    if trend_aligned != "ALL":
+        df = df[df["trend_aligned"].astype(str) == trend_aligned]
+
+    if year != "ALL" and "entry_date" in df.columns:
+        df = df[
+            df["entry_date"].dt.year.astype("Int64").astype(str) == year
+        ]
+
+    if pnl_mode == "Winners only":
+        df = df[df["pnl_abs"] > 0]
+    elif pnl_mode == "Losers only":
+        df = df[df["pnl_abs"] <= 0]
+
+    if hold_range is not None and "bars_held" in df.columns:
+        df = df[
+            df["bars_held"].fillna(-1).between(hold_range[0], hold_range[1])
+        ]
+
+    if pnl_atr_range is not None and "pnl_atr" in df.columns:
+        df = df[
+            df["pnl_atr"].fillna(0).between(pnl_atr_range[0], pnl_atr_range[1])
+        ]
+
+    return df
 
 def main() -> None:
     st.set_page_config(page_title="POC Backtest Dashboard", layout="wide")
@@ -681,33 +730,117 @@ def main() -> None:
     with tab5:
         st.subheader("Equity a drawdown")
 
-        if equity_df.empty:
-            st.info("Nejsou k dispozici žádné uzavřené obchody pro equity.")
+        if real_trades.empty:
+            st.info("Nejsou k dispozici žádné obchody pro equity.")
+            return
+
+        ef1, ef2, ef3, ef4, ef5, ef6 = st.columns(6)
+
+        eq_tickers = ["ALL"] + sorted(real_trades["ticker"].dropna().unique().tolist())
+        eq_periods = ["ALL"] + sorted(real_trades["period_type"].dropna().unique().tolist())
+        eq_sides = ["ALL"] + sorted(real_trades["side"].dropna().unique().tolist())
+        eq_exits = ["ALL"] + sorted(real_trades["exit_reason"].dropna().unique().tolist())
+        eq_trend_flags = ["ALL", "True", "False"]
+
+        eq_year_values = sorted(
+            real_trades["entry_date"].dropna().dt.year.astype(int).unique().tolist()
+        ) if "entry_date" in real_trades.columns else []
+        eq_years = ["ALL"] + [str(y) for y in eq_year_values]
+
+        selected_eq_ticker = ef1.selectbox("Ticker", eq_tickers, key="eq_ticker")
+        selected_eq_period = ef2.selectbox("Period type", eq_periods, key="eq_period")
+        selected_eq_side = ef3.selectbox("Side", eq_sides, key="eq_side")
+        selected_eq_exit = ef4.selectbox("Exit reason", eq_exits, key="eq_exit")
+        selected_eq_trend = ef5.selectbox("Trend aligned", eq_trend_flags, key="eq_trend")
+        selected_eq_year = ef6.selectbox("Year", eq_years, key="eq_year")
+
+        eg1, eg2 = st.columns(2)
+
+        selected_eq_pnl_mode = eg1.selectbox(
+            "PnL filter",
+            ["ALL", "Winners only", "Losers only"],
+            key="eq_pnl_mode",
+        )
+
+        hold_min, hold_max = 0, 200
+        if "bars_held" in real_trades.columns and real_trades["bars_held"].notna().any():
+            hold_min = int(real_trades["bars_held"].min())
+            hold_max = int(real_trades["bars_held"].max())
+
+        selected_eq_hold_range = eg2.slider(
+            "Hold bars range",
+            min_value=hold_min,
+            max_value=hold_max,
+            value=(hold_min, hold_max),
+            key="eq_hold_range",
+        )
+
+        pnl_atr_series = real_trades["pnl_atr"].dropna() if "pnl_atr" in real_trades.columns else pd.Series(dtype=float)
+        if not pnl_atr_series.empty:
+            eq_pnl_atr_min = float(pnl_atr_series.min())
+            eq_pnl_atr_max = float(pnl_atr_series.max())
         else:
-            e1, e2 = st.columns(2)
+            eq_pnl_atr_min, eq_pnl_atr_max = -5.0, 5.0
 
-            with e1:
-                st.plotly_chart(plot_equity_curve(equity_df), width="stretch")
+        selected_eq_pnl_atr_range = st.slider(
+            "PnL ATR range",
+            min_value=float(eq_pnl_atr_min),
+            max_value=float(eq_pnl_atr_max),
+            value=(float(eq_pnl_atr_min), float(eq_pnl_atr_max)),
+            key="eq_pnl_atr_range",
+        )
 
-            with e2:
-                st.plotly_chart(plot_drawdown_curve(equity_df), width="stretch")
+        equity_filtered = filter_trades_for_analysis(
+            real_trades,
+            ticker=selected_eq_ticker,
+            period_type=selected_eq_period,
+            side=selected_eq_side,
+            exit_reason=selected_eq_exit,
+            trend_aligned=selected_eq_trend,
+            year=selected_eq_year,
+            pnl_mode=selected_eq_pnl_mode,
+            hold_range=selected_eq_hold_range,
+            pnl_atr_range=selected_eq_pnl_atr_range,
+        )
 
-            if not equity_period_df.empty:
-                st.plotly_chart(plot_equity_by_period(equity_period_df), width="stretch")
+        equity_df_filtered = build_equity_df(equity_filtered)
+        equity_period_df_filtered = build_equity_by_period(equity_filtered)
+        perf_filtered = build_performance_metrics(equity_filtered)
 
-            st.subheader("Uzavřené obchody pro equity")
-            equity_preview_cols = [
+        st.write(f"Obchodů pro equity: **{len(equity_df_filtered)}**")
+
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Total PnL", f"{perf_filtered['total_pnl']:.2f}")
+        p2.metric("Profit factor", f"{perf_filtered['profit_factor']:.3f}" if pd.notna(perf_filtered["profit_factor"]) else "n/a")
+        p3.metric("Max drawdown", f"{perf_filtered['max_drawdown']:.2f}" if pd.notna(perf_filtered["max_drawdown"]) else "n/a")
+        p4.metric("Avg trade", f"{perf_filtered['avg_trade']:.3f}" if pd.notna(perf_filtered["avg_trade"]) else "n/a")
+        p5.metric("Median trade", f"{perf_filtered['median_trade']:.3f}" if pd.notna(perf_filtered["median_trade"]) else "n/a")
+
+        if equity_df_filtered.empty:
+            st.warning("Žádné uzavřené obchody neodpovídají zvoleným filtrům.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(plot_equity_curve(equity_df_filtered), width="stretch")
+            with c2:
+                st.plotly_chart(plot_drawdown_curve(equity_df_filtered), width="stretch")
+
+            if not equity_period_df_filtered.empty:
+                st.plotly_chart(plot_equity_by_period(equity_period_df_filtered), width="stretch")
+
+            preview_cols = [
                 "ticker",
                 "period_type",
+                "side",
                 "entry_date",
                 "exit_date",
+                "exit_reason",
                 "pnl_abs",
                 "equity",
                 "drawdown",
             ]
-            preview = equity_df[equity_preview_cols].copy()
-            st.dataframe(preview, width="stretch", hide_index=True)
-
+            preview_cols = [c for c in preview_cols if c in equity_df_filtered.columns]
+            st.dataframe(equity_df_filtered[preview_cols], width="stretch", hide_index=True)
 
 if __name__ == "__main__":
     main()
