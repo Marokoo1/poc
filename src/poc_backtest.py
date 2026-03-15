@@ -36,6 +36,15 @@ MIN_LEVEL_AGE_BARS = 3
 # Backtest preset configuration
 # ============================================================
 
+SUPERSESSION_ENABLED = True
+
+SUPERSESSION_THRESHOLD_ATR = {
+    "weekly": 0.75,
+    "monthly": 1.00,
+    "yearly": 1.25,
+}
+
+
 ENTRY_BUFFER_ATR = 0.20
 BACKTEST_PRESET = "balanced"
 
@@ -410,6 +419,104 @@ def departure_reached(bar: pd.Series, level: float, side: str, threshold_abs: fl
         return low <= level - threshold_abs
     return False
 
+
+
+def get_row_on_or_after(ohlcv: pd.DataFrame, dt: pd.Timestamp) -> pd.Series | None:
+    idx = get_first_row_on_or_after(ohlcv, dt)
+    if idx is None:
+        return None
+    return ohlcv.iloc[idx]
+
+
+def infer_level_side_at_active_from(level_row: pd.Series, ohlcv: pd.DataFrame) -> str:
+    active_from = pd.Timestamp(level_row["ActiveFrom"])
+    row = get_row_on_or_after(ohlcv, active_from)
+    if row is None:
+        return "unknown"
+
+    close_px = float(row["Close"])
+    level = float(level_row["POC"])
+    return infer_side_from_activation(close_px, level)
+
+
+def get_level_atr_at_active_from(level_row: pd.Series, ohlcv: pd.DataFrame) -> float | None:
+    active_from = pd.Timestamp(level_row["ActiveFrom"])
+    row = get_row_on_or_after(ohlcv, active_from)
+    if row is None:
+        return None
+
+    atr = row.get("ATR")
+    if pd.isna(atr) or atr is None or float(atr) <= 0:
+        return None
+    return float(atr)
+
+
+def apply_level_supersession(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    if levels.empty or not SUPERSESSION_ENABLED:
+        out = levels.copy()
+        if "ValidUntil" not in out.columns:
+            out["ValidUntil"] = pd.NaT
+        return out
+
+    out = levels.copy()
+    out["ActiveFrom"] = pd.to_datetime(out["ActiveFrom"], errors="coerce")
+    out["ValidUntil"] = pd.NaT
+
+    # Metadata potřebná pro rozhodnutí, které levely jsou "stejná zóna".
+    out["level_side"] = out.apply(lambda r: infer_level_side_at_active_from(r, ohlcv), axis=1)
+    out["active_atr"] = out.apply(lambda r: get_level_atr_at_active_from(r, ohlcv), axis=1)
+
+    out = out.sort_values(["ActiveFrom", "PeriodType", "POC"]).reset_index(drop=True)
+
+    for new_idx in range(len(out)):
+        new_row = out.iloc[new_idx]
+
+        new_active_from = pd.Timestamp(new_row["ActiveFrom"])
+        new_period_type = str(new_row["PeriodType"]).lower()
+        new_side = str(new_row["level_side"]).lower()
+        new_poc = float(new_row["POC"])
+        new_atr = new_row["active_atr"]
+
+        if pd.isna(new_active_from) or new_side == "unknown":
+            continue
+
+        threshold_mult = float(SUPERSESSION_THRESHOLD_ATR.get(new_period_type, 1.0))
+        if pd.isna(new_atr) or new_atr is None or float(new_atr) <= 0:
+            continue
+
+        threshold_abs = float(new_atr) * threshold_mult
+
+        # Hledej starší levely stejného tickeru / typu periody / směru ve stejné zóně.
+        older_mask = (
+            (out.index < new_idx)
+            & (pd.to_datetime(out["ActiveFrom"], errors="coerce") < new_active_from)
+            & (out["PeriodType"].astype(str).str.lower() == new_period_type)
+            & (out["level_side"].astype(str).str.lower() == new_side)
+        )
+
+        if not older_mask.any():
+            continue
+
+        older_candidates = out.loc[older_mask].copy()
+        if older_candidates.empty:
+            continue
+
+        older_candidates["price_distance"] = (older_candidates["POC"].astype(float) - new_poc).abs()
+        same_zone = older_candidates["price_distance"] <= threshold_abs
+
+        if not same_zone.any():
+            continue
+
+        same_zone_idx = older_candidates.loc[same_zone].index.tolist()
+
+        for old_idx in same_zone_idx:
+            old_valid_until = out.at[old_idx, "ValidUntil"]
+            # Zkrať starý level jen dopředu v čase, nikdy ne zpětně.
+            if pd.isna(old_valid_until) or pd.Timestamp(new_active_from) < pd.Timestamp(old_valid_until):
+                out.at[old_idx, "ValidUntil"] = new_active_from
+
+    out = out.drop(columns=["level_side", "active_atr"], errors="ignore")
+    return out
 
 def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeResult:
     ticker = str(level_row["Ticker"])
