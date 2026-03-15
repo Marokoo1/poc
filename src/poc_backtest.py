@@ -905,7 +905,7 @@ def main() -> None:
         max_entries_per_day=MAX_ENTRIES_PER_TICKER_PER_DAY,
 )
 
-summary_df = build_summary(trades_df)
+    summary_df = build_summary(trades_df)
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     levels_df.to_csv(LEVELS_FILE, index=False)
