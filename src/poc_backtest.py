@@ -153,6 +153,12 @@ MAX_ENTRIES_PER_TICKER_PER_DAY = 1
 DAILY_LIMIT_EXIT_REASON = "daily_limit"
 FIRST_TOUCH_INVALID_EXIT_REASON = "first_touch_invalid"
 
+ENTRY_VOLATILITY_FILTER_ENABLED = True
+ENTRY_VOLATILITY_FAST_BARS = 2
+ENTRY_VOLATILITY_MULTIPLIER = 1.35
+ENTRY_VOLATILITY_EXIT_REASON = "entry_volatility_too_high"
+
+
 # ============================================================
 # DATA MODEL
 # ============================================================
@@ -518,6 +524,46 @@ def apply_level_supersession(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.Da
     out = out.drop(columns=["level_side", "active_atr"], errors="ignore")
     return out
 
+def compute_true_range_series(df: pd.DataFrame) -> pd.Series:
+    high = pd.to_numeric(df["High"], errors="coerce")
+    low = pd.to_numeric(df["Low"], errors="coerce")
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    prev_close = close.shift(1)
+
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr
+
+
+def entry_volatility_too_high(future: pd.DataFrame, touch_idx: int) -> bool:
+    if not ENTRY_VOLATILITY_FILTER_ENABLED:
+        return False
+
+    if future.empty or touch_idx < 0 or touch_idx >= len(future):
+        return False
+
+    start_idx = max(0, touch_idx - ENTRY_VOLATILITY_FAST_BARS + 1)
+    window = future.iloc[start_idx : touch_idx + 1].copy()
+
+    if window.empty:
+        return False
+
+    if "TR" in window.columns:
+        tr_mean = pd.to_numeric(window["TR"], errors="coerce").mean()
+    else:
+        tr_mean = compute_true_range_series(window).mean()
+
+    touch_row = future.iloc[touch_idx]
+    atr14 = pd.to_numeric(pd.Series([touch_row.get("ATR")]), errors="coerce").iloc[0]
+
+    if pd.isna(tr_mean) or pd.isna(atr14) or atr14 <= 0:
+        return False
+
+    return float(tr_mean) > float(atr14) * ENTRY_VOLATILITY_MULTIPLIER
+
 def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeResult:
     ticker = str(level_row["Ticker"])
     period_type = str(level_row["PeriodType"])
@@ -623,6 +669,11 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     # po departure bereme pouze první návrat ceny do level zóny
     # ============================================================
     
+    # ============================================================
+    # FIRST TOUCH ONLY:
+    # po departure bereme pouze první návrat ceny do level zóny
+    # ============================================================
+
     first_touch_idx = None
     first_touch_bar = None
     first_touch_atr = None
@@ -706,6 +757,18 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
             exit_reason=FIRST_TOUCH_INVALID_EXIT_REASON,
         )
 
+    if entry_volatility_too_high(future, first_touch_idx):
+        return make_empty_trade_result(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level=level,
+            side=initial_side,
+            active_from=active_from,
+            trend_context=trend_context,
+            exit_reason=ENTRY_VOLATILITY_EXIT_REASON,
+        )
+
     side = touch_signal
     trend_aligned = is_trend_aligned(side, trend_context)
 
@@ -721,6 +784,9 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     else:
         stop_price = entry_price + stop_atr * atr
         target_price = entry_price - target_atr * atr
+
+    # Den vstupu:
+    # - SL může být zasažen hned
 
     # Den vstupu:
     # - SL může být zasažen hned
