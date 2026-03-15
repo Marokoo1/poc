@@ -252,6 +252,150 @@ def build_ticker_summary(trades: pd.DataFrame) -> pd.DataFrame:
 
     out["win_rate"] = (out["win_rate"] * 100).round(2)
     return out
+    
+def build_equity_df(trades: pd.DataFrame) -> pd.DataFrame:
+    real = trades[trades["entry_date"].notna()].copy()
+    if real.empty:
+        return pd.DataFrame()
+
+    real["exit_date"] = pd.to_datetime(real["exit_date"], errors="coerce")
+    real = real.dropna(subset=["exit_date", "pnl_abs"]).copy()
+
+    if real.empty:
+        return pd.DataFrame()
+
+    real = real.sort_values(["exit_date", "ticker", "period_type"]).reset_index(drop=True)
+    real["equity"] = real["pnl_abs"].cumsum()
+    real["running_max"] = real["equity"].cummax()
+    real["drawdown"] = real["equity"] - real["running_max"]
+    return real
+
+
+def build_equity_by_period(trades: pd.DataFrame) -> pd.DataFrame:
+    real = trades[trades["entry_date"].notna()].copy()
+    if real.empty:
+        return pd.DataFrame()
+
+    real["exit_date"] = pd.to_datetime(real["exit_date"], errors="coerce")
+    real = real.dropna(subset=["exit_date", "pnl_abs"]).copy()
+
+    if real.empty:
+        return pd.DataFrame()
+
+    real = real.sort_values(["period_type", "exit_date", "ticker"]).reset_index(drop=True)
+    real["equity_by_period"] = real.groupby("period_type", observed=False)["pnl_abs"].cumsum()
+    return real
+
+
+def build_performance_metrics(trades: pd.DataFrame) -> dict:
+    eq = build_equity_df(trades)
+    if eq.empty:
+        return {
+            "total_pnl": 0.0,
+            "profit_factor": float("nan"),
+            "max_drawdown": float("nan"),
+            "avg_trade": float("nan"),
+            "median_trade": float("nan"),
+        }
+
+    gross_profit = eq.loc[eq["pnl_abs"] > 0, "pnl_abs"].sum()
+    gross_loss = -eq.loc[eq["pnl_abs"] < 0, "pnl_abs"].sum()
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+
+    return {
+        "total_pnl": float(eq["pnl_abs"].sum()),
+        "profit_factor": float(profit_factor),
+        "max_drawdown": float(eq["drawdown"].min()),
+        "avg_trade": float(eq["pnl_abs"].mean()),
+        "median_trade": float(eq["pnl_abs"].median()),
+    }
+
+
+def plot_equity_curve(equity_df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=equity_df["exit_date"],
+            y=equity_df["equity"],
+            mode="lines",
+            name="Equity",
+            line=dict(width=2),
+        )
+    )
+
+    fig.update_layout(
+        title="Equity curve",
+        template="plotly_dark",
+        paper_bgcolor="#0B1220",
+        plot_bgcolor="#0B1220",
+        height=460,
+        margin=dict(l=20, r=20, t=50, b=20),
+        xaxis_title="Exit date",
+        yaxis_title="Kumulativní PnL",
+        hovermode="x unified",
+    )
+    return fig
+
+
+def plot_drawdown_curve(equity_df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=equity_df["exit_date"],
+            y=equity_df["drawdown"],
+            mode="lines",
+            name="Drawdown",
+            line=dict(width=2),
+            fill="tozeroy",
+        )
+    )
+
+    fig.update_layout(
+        title="Drawdown",
+        template="plotly_dark",
+        paper_bgcolor="#0B1220",
+        plot_bgcolor="#0B1220",
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=20),
+        xaxis_title="Exit date",
+        yaxis_title="Drawdown",
+        hovermode="x unified",
+    )
+    return fig
+
+
+def plot_equity_by_period(equity_period_df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+
+    for period_type in sorted(equity_period_df["period_type"].dropna().unique().tolist()):
+        subset = equity_period_df[equity_period_df["period_type"] == period_type].copy()
+        subset = subset.sort_values("exit_date")
+
+        fig.add_trace(
+            go.Scatter(
+                x=subset["exit_date"],
+                y=subset["equity_by_period"],
+                mode="lines",
+                name=str(period_type),
+                line=dict(width=2),
+            )
+        )
+
+    fig.update_layout(
+        title="Equity podle typu levelu",
+        template="plotly_dark",
+        paper_bgcolor="#0B1220",
+        plot_bgcolor="#0B1220",
+        height=460,
+        margin=dict(l=20, r=20, t=50, b=20),
+        xaxis_title="Exit date",
+        yaxis_title="Kumulativní PnL",
+        hovermode="x unified",
+    )
+    return fig
+    
 
 
 def main() -> None:
@@ -268,6 +412,9 @@ def main() -> None:
 
     metrics = build_overview_metrics(trades)
     real_trades = trades[trades["entry_date"].notna()].copy()
+    equity_df = build_equity_df(trades)
+    equity_period_df = build_equity_by_period(trades)
+    perf = build_performance_metrics(trades)
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Levelů", f"{metrics['total_levels']:,}")
@@ -275,11 +422,16 @@ def main() -> None:
     col3.metric("Win rate", f"{metrics['win_rate']:.2f}%")
     col4.metric("Avg PnL ATR", f"{metrics['avg_pnl_atr']:.3f}" if pd.notna(metrics["avg_pnl_atr"]) else "n/a")
     col5.metric("Avg hold", f"{metrics['avg_hold']:.2f} d" if pd.notna(metrics["avg_hold"]) else "n/a")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total PnL", f"{perf['total_pnl']:.2f}")
+    m2.metric("Profit factor", f"{perf['profit_factor']:.3f}" if pd.notna(perf["profit_factor"]) else "n/a")
+    m3.metric("Max drawdown", f"{perf['max_drawdown']:.2f}" if pd.notna(perf["max_drawdown"]) else "n/a")
+    m4.metric("Avg trade", f"{perf['avg_trade']:.3f}" if pd.notna(perf["avg_trade"]) else "n/a")
+    m5.metric("Median trade", f"{perf['median_trade']:.3f}" if pd.notna(perf["median_trade"]) else "n/a")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Summary", "Ticker summary", "Trades explorer", "Trade chart"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Summary", "Ticker summary", "Trades explorer", "Trade chart", "Equity"]
     )
-
     with tab1:
         st.subheader("Souhrn podle typu levelu")
         st.dataframe(summary, width="stretch", hide_index=True)
@@ -525,6 +677,36 @@ def main() -> None:
     
         detail = pd.DataFrame([selected_trade.drop(labels=["label"])])
         st.dataframe(detail, width="stretch", hide_index=True)
+
+    with tab5:
+        st.subheader("Equity a drawdown")
+
+        if equity_df.empty:
+            st.info("Nejsou k dispozici žádné uzavřené obchody pro equity.")
+        else:
+            e1, e2 = st.columns(2)
+
+            with e1:
+                st.plotly_chart(plot_equity_curve(equity_df), width="stretch")
+
+            with e2:
+                st.plotly_chart(plot_drawdown_curve(equity_df), width="stretch")
+
+            if not equity_period_df.empty:
+                st.plotly_chart(plot_equity_by_period(equity_period_df), width="stretch")
+
+            st.subheader("Uzavřené obchody pro equity")
+            equity_preview_cols = [
+                "ticker",
+                "period_type",
+                "entry_date",
+                "exit_date",
+                "pnl_abs",
+                "equity",
+                "drawdown",
+            ]
+            preview = equity_df[equity_preview_cols].copy()
+            st.dataframe(preview, width="stretch", hide_index=True)
 
 
 if __name__ == "__main__":
