@@ -230,6 +230,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 # HISTORICAL LEVEL GENERATION
 # ============================================================
+
+
 def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
@@ -261,6 +263,7 @@ def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataF
 # ============================================================
 # BACKTEST HELPERS
 # ============================================================
+
 def get_first_row_on_or_after(df: pd.DataFrame, dt: pd.Timestamp) -> Optional[int]:
     matches = df.index[df["Date"] >= dt].tolist()
     return matches[0] if matches else None
@@ -507,6 +510,7 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     # FIRST TOUCH ONLY:
     # po departure bereme pouze první návrat ceny do level zóny
     # ============================================================
+    
     first_touch_idx = None
     first_touch_bar = None
     first_touch_atr = None
@@ -778,13 +782,26 @@ def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> p
     entered["period_priority"] = entered["period_type"].map(period_priority).fillna(999)
 
     entered = entered.sort_values(
-        ["ticker", "entry_date", "active_from_dt", "period_priority", "level_price"],
+        ["ticker", "entry_date", "period_priority", "active_from_dt", "level_price"],
         ascending=[True, True, True, True, True],
     ).copy()
 
-    entered["entry_rank_in_day"] = entered.groupby(["ticker", "entry_date"]).cumcount() + 1
+    # Limit aplikujeme jen na weekly + monthly.
+    # Yearly necháváme mimo denní limit.
+    limit_scope_mask = entered["period_type"].isin(["weekly", "monthly"])
 
-    over_limit_mask = entered["entry_rank_in_day"] > max_entries_per_day
+    entered["entry_rank_in_day"] = np.nan
+    entered.loc[limit_scope_mask, "entry_rank_in_day"] = (
+        entered.loc[limit_scope_mask]
+        .groupby(["ticker", "entry_date"])
+        .cumcount() + 1
+    )
+
+    over_limit_mask = (
+        limit_scope_mask
+        & entered["entry_rank_in_day"].notna()
+        & (entered["entry_rank_in_day"] > max_entries_per_day)
+    )
 
     if over_limit_mask.any():
         cols_to_null = [
