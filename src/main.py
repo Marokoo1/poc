@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 import yaml
+import time
 
 from data_fetcher import fetch_from_ib, fetch_yahoo_data, load_csv_data
 from poc_calculator import (
@@ -254,58 +255,138 @@ def save_poc_output(symbol: str, poc_df: pd.DataFrame, processed_dir: Path) -> P
     output_path = processed_dir / f"{symbol}_poc.csv"
     poc_df.to_csv(output_path, index=False)
     return output_path
+    
+def format_seconds(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
 
+    if h > 0:
+        return f"{h} h {m} min {s} s"
+    if m > 0:
+        return f"{m} min {s} s"
+    return f"{s} s"
 
 def main() -> None:
-    config = load_config(CONFIG_PATH)
+    started_at = time.time()
 
-    paths_cfg = config.get("paths", {})
-    raw_dir = ensure_directory(paths_cfg.get("raw_data_dir", "data/raw"))
-    processed_dir = ensure_directory(paths_cfg.get("processed_data_dir", "data/processed"))
+    try:
+        poc_df = load_all_poc_levels(PROCESSED_DIR)
+    except Exception as e:
+        print(f"❌ {e}")
+        return
 
-    symbols = load_symbols(config)
-    if not symbols:
-        raise ValueError("Nebyl načten žádný ticker z watchlistu.")
+    if poc_df.empty:
+        print("❌ Žádné POC levely k obohacení.")
+        return
 
-    data_source_mode = config.get("data_source", {}).get("mode", "yahoo")
+    all_frames: list[pd.DataFrame] = []
+    tickers = sorted(poc_df["Ticker"].dropna().astype(str).unique().tolist())
+    total_tickers = len(tickers)
 
-    print(f"📂 Projekt: {config.get('project', {}).get('name', 'POC Project')}")
-    print(f"📈 Tickery: {', '.join(symbols)}")
-    print(f"🗂 Raw dir: {raw_dir}")
-    print(f"🗂 Processed dir: {processed_dir}")
-    print(f"🔌 Data source: {data_source_mode}")
+    print(f"📂 Projekt: {PROJECT_DIR}")
+    print(f"📁 Raw dir: {RAW_DIR}")
+    print(f"📁 Processed dir: {PROCESSED_DIR}")
+    print(f"📄 Output: {OUTPUT_FILE}")
+    print(f"📊 Načteno {len(poc_df)} POC levelů")
+    print(f"🎯 Počet tickerů: {total_tickers}")
+    print(f"📈 Tickery: {', '.join(tickers)}")
     print()
 
-    ok_count = 0
+    success_count = 0
+    empty_count = 0
+    failed_count = 0
 
-    for symbol in symbols:
-        print(f"Zpracovávám {symbol}...")
+    for i, ticker in enumerate(tickers, start=1):
+        ticker_start = time.time()
+        print("=" * 80)
+        print(f"[{i}/{total_tickers}] Zpracovávám {ticker}...")
 
-        price_df = fetch_ohlcv_for_symbol(
-            symbol=symbol,
-            data_source_mode=data_source_mode,
-            config=config,
-            raw_data_dir=str(raw_dir),
+        try:
+            ticker_levels = poc_df[poc_df["Ticker"] == ticker].copy()
+            level_count = len(ticker_levels)
+            print(f"[{i}/{total_tickers}] Levelů pro ticker: {level_count}")
+
+            enriched = enrich_levels_for_ticker(ticker, ticker_levels)
+
+            ticker_elapsed = time.time() - ticker_start
+
+            if not enriched.empty:
+                all_frames.append(enriched)
+                success_count += 1
+                print(
+                    f"[{i}/{total_tickers}] ✅ Obohaceno {len(enriched)} levelů "
+                    f"za {format_seconds(ticker_elapsed)}"
+                )
+            else:
+                empty_count += 1
+                print(
+                    f"[{i}/{total_tickers}] ⚠️ Bez výstupu pro {ticker} "
+                    f"({format_seconds(ticker_elapsed)})"
+                )
+
+        except Exception as e:
+            failed_count += 1
+            ticker_elapsed = time.time() - ticker_start
+            print(
+                f"[{i}/{total_tickers}] ❌ Chyba u {ticker}: {e} "
+                f"(po {format_seconds(ticker_elapsed)})"
+            )
+
+        completed = i
+        elapsed_total = time.time() - started_at
+        avg_per_ticker = elapsed_total / completed if completed else 0
+        remaining = total_tickers - completed
+        eta = remaining * avg_per_ticker
+
+        print(
+            f"[{i}/{total_tickers}] 📊 Průběh: {completed}/{total_tickers} | "
+            f"průměr {format_seconds(avg_per_ticker)} / ticker | "
+            f"ETA {format_seconds(eta)}"
         )
 
-        if price_df.empty:
-            print(f"  ⚠️ Přeskakuji {symbol}: nepodařilo se načíst OHLCV data")
-            continue
+    print("\n" + "=" * 80)
+    print("📌 Souhrn běhu")
+    print(f"   Celkem tickerů: {total_tickers}")
+    print(f"   Úspěšně zpracováno: {success_count}")
+    print(f"   Bez výstupu: {empty_count}")
+    print(f"   S chybou: {failed_count}")
+    print(f"   Celkový čas: {format_seconds(time.time() - started_at)}")
 
-        poc_df = build_poc_for_symbol(symbol, price_df, config)
-        if poc_df.empty:
-            print(f"  ⚠️ Přeskakuji {symbol}: nepodařilo se vytvořit POC výstup")
-            continue
+    if not all_frames:
+        print("⚠️ Nic se nepodařilo zpracovat.")
+        return
 
-        output_path = save_poc_output(symbol, poc_df, processed_dir)
-        print(f"  ✅ Uloženo {len(poc_df)} řádků do {output_path}")
-        ok_count += 1
+    final = pd.concat(all_frames, ignore_index=True)
 
-    print()
-    if ok_count == 0:
-        print("❌ Nepodařilo se vygenerovat žádné *_poc.csv soubory.")
-    else:
-        print(f"✅ Hotovo! Vygenerováno {ok_count} POC souborů.")
+    sort_cols = [c for c in ["Ticker", "PeriodType", "PeriodEnd"] if c in final.columns]
+    if sort_cols:
+        ascending = [True, True, False][: len(sort_cols)]
+        final = final.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    final.to_csv(OUTPUT_FILE, index=False)
+
+    print(f"\n✅ Hotovo! Výstup uložen do: {OUTPUT_FILE}")
+    print(f"📦 Celkem řádků: {len(final)}")
+
+    preview_cols = [
+        "Ticker",
+        "PeriodType",
+        "Period",
+        "POC",
+        "LevelSide",
+        "IsTested",
+        "FirstTestDate",
+        "LastClose",
+        "DistanceATR",
+        "TrendContext",
+        "Score",
+    ]
+    preview_cols = [c for c in preview_cols if c in final.columns]
+
+    print("\nUkázka:")
+    print(final[preview_cols].head(10).to_string(index=False))
 
 
 if __name__ == "__main__":
