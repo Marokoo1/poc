@@ -1040,8 +1040,6 @@ def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd
 
 
 def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> pd.DataFrame:
-
-def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> pd.DataFrame:
     if trades.empty or max_entries_per_day <= 0:
         return trades
 
