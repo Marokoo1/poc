@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import time
 
 import pandas as pd
 import yaml
-import time
 
 from data_fetcher import fetch_from_ib, fetch_yahoo_data, load_csv_data
 from poc_calculator import (
@@ -13,7 +13,6 @@ from poc_calculator import (
     enrich_poc_with_level_status,
     filter_complete_periods,
 )
-
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -23,10 +22,8 @@ CONFIG_PATH = PROJECT_DIR / "config" / "settings.yaml"
 def load_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config nenalezen: {path}")
-
     with path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-
     return config
 
 
@@ -40,12 +37,10 @@ def ensure_directory(path_str: str) -> Path:
 
 def normalize_symbol_list(values: list[Any]) -> list[str]:
     symbols: list[str] = []
-
     for item in values:
         symbol = str(item).strip().upper()
         if symbol:
             symbols.append(symbol)
-
     return sorted(set(symbols))
 
 
@@ -76,7 +71,6 @@ def load_symbols_from_txt(cfg: dict[str, Any]) -> list[str]:
 def load_symbols_from_csv(cfg: dict[str, Any]) -> list[str]:
     path_str = cfg.get("path")
     column = cfg.get("column", "Symbol")
-
     if not path_str:
         raise ValueError("universe.csv_list.path není nastaven.")
 
@@ -110,14 +104,12 @@ def load_symbols_from_tls(cfg: dict[str, Any]) -> list[str]:
         raise FileNotFoundError(f"TLS watchlist nenalezen: {path}")
 
     lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-
     symbols: list[str] = []
+
     for line in lines:
         line = line.strip()
         if not line or line.startswith(";"):
             continue
-
-        # jednoduchý a odolný parser: vezmi první token/sloupec
         token = line.split(",")[0].split(";")[0].strip()
         if token:
             symbols.append(token)
@@ -164,10 +156,8 @@ def fetch_ohlcv_for_symbol(
 def apply_keep_last(df: pd.DataFrame, keep_last: int) -> pd.DataFrame:
     if df.empty:
         return df
-
     if keep_last <= 0:
         return pd.DataFrame(columns=df.columns)
-
     return df.tail(keep_last).reset_index(drop=True)
 
 
@@ -178,7 +168,6 @@ def maybe_enrich_level_status(
 ) -> pd.DataFrame:
     level_status_cfg = config.get("poc", {}).get("level_status", {})
     enabled = bool(level_status_cfg.get("enabled", True))
-
     if not enabled:
         return poc_df
 
@@ -238,10 +227,8 @@ def build_poc_for_symbol(symbol: str, price_df: pd.DataFrame, config: dict[str, 
             "Period_Low",
             "Period_Close",
         ]
-
         extra_cols = [col for col in period_df.columns if col not in ordered_cols]
         period_df = period_df[ordered_cols + extra_cols]
-
         frames.append(period_df)
 
     if not frames:
@@ -255,7 +242,8 @@ def save_poc_output(symbol: str, poc_df: pd.DataFrame, processed_dir: Path) -> P
     output_path = processed_dir / f"{symbol}_poc.csv"
     poc_df.to_csv(output_path, index=False)
     return output_path
-    
+
+
 def format_seconds(seconds: float) -> str:
     seconds = max(0, int(round(seconds)))
     m, s = divmod(seconds, 60)
@@ -267,126 +255,98 @@ def format_seconds(seconds: float) -> str:
         return f"{m} min {s} s"
     return f"{s} s"
 
+
 def main() -> None:
     started_at = time.time()
 
     try:
-        poc_df = load_all_poc_levels(PROCESSED_DIR)
+        config = load_config(CONFIG_PATH)
     except Exception as e:
         print(f"❌ {e}")
         return
 
-    if poc_df.empty:
-        print("❌ Žádné POC levely k obohacení.")
+    project_name = config.get("project", {}).get("name", "POC Project")
+    data_source_mode = config.get("data_source", {}).get("mode", "yahoo")
+
+    paths_cfg = config.get("paths", {})
+    raw_dir = ensure_directory(paths_cfg.get("raw_data_dir", "data/raw"))
+    processed_dir = ensure_directory(paths_cfg.get("processed_data_dir", "data/processed"))
+
+    try:
+        symbols = load_symbols(config)
+    except Exception as e:
+        print(f"❌ Chyba při načítání watchlistu: {e}")
         return
 
-    all_frames: list[pd.DataFrame] = []
-    tickers = sorted(poc_df["Ticker"].dropna().astype(str).unique().tolist())
-    total_tickers = len(tickers)
+    if not symbols:
+        print("❌ Watchlist je prázdný.")
+        return
 
-    print(f"📂 Projekt: {PROJECT_DIR}")
-    print(f"📁 Raw dir: {RAW_DIR}")
-    print(f"📁 Processed dir: {PROCESSED_DIR}")
-    print(f"📄 Output: {OUTPUT_FILE}")
-    print(f"📊 Načteno {len(poc_df)} POC levelů")
-    print(f"🎯 Počet tickerů: {total_tickers}")
-    print(f"📈 Tickery: {', '.join(tickers)}")
-    print()
-
+    total_symbols = len(symbols)
     success_count = 0
     empty_count = 0
     failed_count = 0
+    total_rows = 0
 
-    for i, ticker in enumerate(tickers, start=1):
-        ticker_start = time.time()
+    print(f"📂 Projekt: {project_name}")
+    print(f"📈 Tickery: {', '.join(symbols)}")
+    print(f"🗂 Raw dir: {raw_dir}")
+    print(f"🗂 Processed dir: {processed_dir}")
+    print(f"🔌 Data source: {data_source_mode}")
+    print()
+
+    for i, symbol in enumerate(symbols, start=1):
+        symbol_start = time.time()
         print("=" * 80)
-        print(f"[{i}/{total_tickers}] Zpracovávám {ticker}...")
+        print(f"[{i}/{total_symbols}] Zpracovávám {symbol}...")
 
         try:
-            ticker_levels = poc_df[poc_df["Ticker"] == ticker].copy()
-            level_count = len(ticker_levels)
-            print(f"[{i}/{total_tickers}] Levelů pro ticker: {level_count}")
+            price_df = fetch_ohlcv_for_symbol(
+                symbol=symbol,
+                data_source_mode=data_source_mode,
+                config=config,
+                raw_data_dir=str(raw_dir),
+            )
 
-            enriched = enrich_levels_for_ticker(ticker, ticker_levels)
-
-            ticker_elapsed = time.time() - ticker_start
-
-            if not enriched.empty:
-                all_frames.append(enriched)
-                success_count += 1
-                print(
-                    f"[{i}/{total_tickers}] ✅ Obohaceno {len(enriched)} levelů "
-                    f"za {format_seconds(ticker_elapsed)}"
-                )
-            else:
+            if price_df.empty:
                 empty_count += 1
-                print(
-                    f"[{i}/{total_tickers}] ⚠️ Bez výstupu pro {ticker} "
-                    f"({format_seconds(ticker_elapsed)})"
-                )
+                print(f"[{i}/{total_symbols}] ⚠️ Žádná OHLCV data pro {symbol}")
+            else:
+                poc_df = build_poc_for_symbol(symbol, price_df, config)
+
+                if poc_df.empty:
+                    empty_count += 1
+                    print(f"[{i}/{total_symbols}] ⚠️ Žádná výsledná POC data pro {symbol}")
+                else:
+                    output_path = save_poc_output(symbol, poc_df, processed_dir)
+                    success_count += 1
+                    total_rows += len(poc_df)
+                    print(f"[{i}/{total_symbols}] ✅ Uloženo {len(poc_df)} řádků do {output_path.name}")
 
         except Exception as e:
             failed_count += 1
-            ticker_elapsed = time.time() - ticker_start
-            print(
-                f"[{i}/{total_tickers}] ❌ Chyba u {ticker}: {e} "
-                f"(po {format_seconds(ticker_elapsed)})"
-            )
+            print(f"[{i}/{total_symbols}] ❌ Chyba u {symbol}: {e}")
 
-        completed = i
+        elapsed_symbol = time.time() - symbol_start
         elapsed_total = time.time() - started_at
-        avg_per_ticker = elapsed_total / completed if completed else 0
-        remaining = total_tickers - completed
-        eta = remaining * avg_per_ticker
+        avg_per_symbol = elapsed_total / i
+        remaining = total_symbols - i
+        eta = remaining * avg_per_symbol
 
         print(
-            f"[{i}/{total_tickers}] 📊 Průběh: {completed}/{total_tickers} | "
-            f"průměr {format_seconds(avg_per_ticker)} / ticker | "
+            f"[{i}/{total_symbols}] ⏱ {format_seconds(elapsed_symbol)} | "
+            f"průměr {format_seconds(avg_per_symbol)} / ticker | "
             f"ETA {format_seconds(eta)}"
         )
 
     print("\n" + "=" * 80)
     print("📌 Souhrn běhu")
-    print(f"   Celkem tickerů: {total_tickers}")
+    print(f"   Celkem tickerů: {total_symbols}")
     print(f"   Úspěšně zpracováno: {success_count}")
     print(f"   Bez výstupu: {empty_count}")
     print(f"   S chybou: {failed_count}")
+    print(f"   Celkem uložených řádků: {total_rows}")
     print(f"   Celkový čas: {format_seconds(time.time() - started_at)}")
-
-    if not all_frames:
-        print("⚠️ Nic se nepodařilo zpracovat.")
-        return
-
-    final = pd.concat(all_frames, ignore_index=True)
-
-    sort_cols = [c for c in ["Ticker", "PeriodType", "PeriodEnd"] if c in final.columns]
-    if sort_cols:
-        ascending = [True, True, False][: len(sort_cols)]
-        final = final.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
-
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    final.to_csv(OUTPUT_FILE, index=False)
-
-    print(f"\n✅ Hotovo! Výstup uložen do: {OUTPUT_FILE}")
-    print(f"📦 Celkem řádků: {len(final)}")
-
-    preview_cols = [
-        "Ticker",
-        "PeriodType",
-        "Period",
-        "POC",
-        "LevelSide",
-        "IsTested",
-        "FirstTestDate",
-        "LastClose",
-        "DistanceATR",
-        "TrendContext",
-        "Score",
-    ]
-    preview_cols = [c for c in preview_cols if c in final.columns]
-
-    print("\nUkázka:")
-    print(final[preview_cols].head(10).to_string(index=False))
 
 
 if __name__ == "__main__":
