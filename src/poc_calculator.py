@@ -363,10 +363,8 @@ def calculate_poc(
     include_level_status: bool = False,
     track_touch: bool = True,
     track_cross: bool = True,
+    progress_callback=None,
 ) -> pd.DataFrame:
-    prepared = _prepare_dataframe(df)
-    if prepared.empty:
-        return pd.DataFrame()
 
     selected_periods = periods or ["weekly", "monthly", "yearly"]
     keep_last = keep_last or {"weekly": 5, "monthly": 5, "yearly": 3}
@@ -374,9 +372,42 @@ def calculate_poc(
     inferred_tick_size = tick_size if tick_size is not None else auto_tick_size(prepared)
 
     results = []
-    for period in selected_periods:
-        period_df = calculate_period_poc(prepared, period=period, tick_size=inferred_tick_size)
-        period_df = filter_complete_periods(period_df, period=period, today=today)
+total_periods = len(selected_periods)
+
+for idx, period in enumerate(selected_periods, start=1):
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "period_start",
+                "period": period,
+                "index": idx,
+                "total": total_periods,
+            }
+        )
+
+    period_df = calculate_period_poc(prepared, period=period, tick_size=inferred_tick_size)
+    period_df = filter_complete_periods(period_df, period=period, today=today)
+
+    keep = keep_last.get(period)
+    if keep is not None:
+        period_df = period_df.tail(keep).reset_index(drop=True)
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "period_done",
+                "period": period,
+                "index": idx,
+                "total": total_periods,
+                "rows": len(period_df),
+            }
+        )
+
+    if period_df.empty:
+        continue
+
+    period_df.insert(0, "PeriodType", period)
+    results.append(period_df)
 
         keep = keep_last.get(period)
         if keep is not None:
