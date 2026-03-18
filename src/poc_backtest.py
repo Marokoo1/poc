@@ -6,6 +6,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import time
 
 from poc_calculator import calculate_period_poc, filter_complete_periods
 
@@ -20,6 +21,75 @@ PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
 TRADES_FILE = PROCESSED_DIR / "poc_backtest_trades.csv"
 SUMMARY_FILE = PROCESSED_DIR / "poc_backtest_summary.csv"
 LEVELS_FILE = PROCESSED_DIR / "poc_backtest_levels.csv"
+RUN_LOG_FILE = PROCESSED_DIR / "poc_backtest_run_log.csv"
+
+
+def format_seconds(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+
+    if h > 0:
+        return f"{h} h {m} min {s} s"
+    if m > 0:
+        return f"{m} min {s} s"
+    return f"{s} s"
+
+
+def append_run_log_row(
+    *,
+    ticker: str,
+    status: str,
+    elapsed_sec: float,
+    raw_rows: int,
+    level_rows: int,
+    trade_rows: int,
+    summary_rows: int,
+    error: str = "",
+) -> None:
+    row = pd.DataFrame(
+        [
+            {
+                "ticker": ticker,
+                "status": status,
+                "elapsed_sec": round(float(elapsed_sec), 3),
+                "raw_rows": int(raw_rows),
+                "level_rows": int(level_rows),
+                "trade_rows": int(trade_rows),
+                "summary_rows": int(summary_rows),
+                "error": error,
+                "logged_at": pd.Timestamp.now(),
+            }
+        ]
+    )
+
+    if RUN_LOG_FILE.exists():
+        row.to_csv(RUN_LOG_FILE, mode="a", header=False, index=False)
+    else:
+        row.to_csv(RUN_LOG_FILE, index=False)
+
+
+def print_progress(
+    *,
+    idx: int,
+    total: int,
+    ticker: str,
+    ticker_elapsed: float,
+    started_at: float,
+) -> None:
+    elapsed_total = time.time() - started_at
+    avg_per_ticker = elapsed_total / idx if idx else 0.0
+    remaining = total - idx
+    eta = remaining * avg_per_ticker
+
+    print(
+        f"[{idx}/{total}] {ticker} | "
+        f"čas {format_seconds(ticker_elapsed)} | "
+        f"průměr {format_seconds(avg_per_ticker)} / ticker | "
+        f"ETA {format_seconds(eta)}"
+    )
+
+
 
 # ============================================================
 # SETTINGS
@@ -937,6 +1007,40 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     )
 
 
+def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ohlcv = load_ohlcv(ticker)
+    if ohlcv.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    ohlcv = add_indicators(ohlcv)
+
+    levels = build_all_levels_for_ticker(ticker, ohlcv)
+    if levels.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    levels = apply_level_supersession(levels, ohlcv)
+
+    trade_results: list[TradeResult] = []
+    for _, level_row in levels.iterrows():
+        trade_results.append(simulate_single_level(level_row, ohlcv))
+
+    trades = pd.DataFrame([asdict(t) for t in trade_results]) if trade_results else pd.DataFrame()
+
+    if trades.empty:
+        summary = pd.DataFrame()
+        return levels, trades, summary
+
+    summary = (
+        trades.groupby(["ticker", "period_type", "side", "exit_reason"], dropna=False)
+        .size()
+        .reset_index(name="count")
+    )
+
+    return levels, trades, summary
+
+
+def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> pd.DataFrame:
+
 def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> pd.DataFrame:
     if trades.empty or max_entries_per_day <= 0:
         return trades
@@ -1045,80 +1149,138 @@ def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 def main() -> None:
-    raw_files = sorted(RAW_DIR.glob("*.csv"))
-    if not raw_files:
-        raise FileNotFoundError(f"V {RAW_DIR} nebyly nalezeny žádné raw CSV soubory.")
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    all_levels: list[pd.DataFrame] = []
-    all_results: list[dict] = []
+    started_at = time.time()
 
-    tickers = [p.stem for p in raw_files]
-    print(f"🎯 Historický backtest tickerů: {', '.join(tickers)}")
+    tickers = sorted(
+        [
+            path.stem
+            for path in RAW_DIR.glob("*.csv")
+            if path.is_file()
+        ]
+    )
 
-    for path in raw_files:
-        ticker = path.stem
-        print(f"Zpracovávám {ticker}...")
-
-        ohlcv = load_ohlcv(ticker)
-        if ohlcv.empty:
-            print(f"  ⚠️ Chybí nebo jsou neplatná raw data")
-            continue
-
-        ohlcv = add_indicators(ohlcv)
-
-        levels = build_all_levels_for_ticker(ticker, ohlcv)
-        if levels.empty:
-            print(f"  ⚠️ Nevznikly žádné historické levely")
-            continue
-
-        levels = apply_level_supersession(levels, ohlcv)
-
-        all_levels.append(levels)
-
-        for _, level_row in levels.iterrows():
-            result = simulate_single_level(level_row, ohlcv)
-            all_results.append(asdict(result))
-        print(f"  ✅ Historických levelů: {len(levels)}")
-
-    if not all_results:
-        print("⚠️ Nevznikly žádné výsledky.")
+    if not tickers:
+        print(f"❌ V {RAW_DIR} nebyly nalezeny žádné CSV soubory.")
         return
 
-    levels_df = pd.concat(all_levels, ignore_index=True) if all_levels else pd.DataFrame()
-    trades_df = pd.DataFrame(all_results)
-    trades_df = apply_daily_entry_limit(
-        trades_df,
-        max_entries_per_day=MAX_ENTRIES_PER_TICKER_PER_DAY,
-)
+    all_levels: list[pd.DataFrame] = []
+    all_trades: list[pd.DataFrame] = []
+    all_summary: list[pd.DataFrame] = []
 
-    summary_df = build_summary(trades_df)
+    success_count = 0
+    empty_count = 0
+    failed_count = 0
 
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    levels_df.to_csv(LEVELS_FILE, index=False)
-    trades_df.to_csv(TRADES_FILE, index=False)
-    if not summary_df.empty:
-        summary_df.to_csv(SUMMARY_FILE, index=False)
-
+    print(f"📂 Projekt: {PROJECT_DIR}")
+    print(f"📁 Raw dir: {RAW_DIR}")
+    print(f"📁 Processed dir: {PROCESSED_DIR}")
+    print(f"📈 Tickery: {', '.join(tickers)}")
+    print(f"🎯 Počet tickerů: {len(tickers)}")
+    print(f"🧪 Preset: {BACKTEST_PRESET}")
+    print(f"📆 Periody: {', '.join(INCLUDE_PERIODS)}")
     print()
-    print(f"✅ Levels uloženy do: {LEVELS_FILE}")
-    print(f"✅ Trades uloženy do: {TRADES_FILE}")
-    if not summary_df.empty:
-        print(f"✅ Summary uloženo do: {SUMMARY_FILE}")
 
-    print("\nUkázka obchodů:")
-    preview_cols = [
-        "ticker",
-        "period_type",
-        "period",
-        "side",
-        "entry_date",
-        "exit_date",
-        "exit_reason",
-        "pnl_abs",
-        "pnl_atr",
-    ]
-    preview_cols = [c for c in preview_cols if c in trades_df.columns]
-    print(trades_df[preview_cols].head(20).to_string(index=False))
+    for i, ticker in enumerate(tickers, start=1):
+        ticker_start = time.time()
+        print("=" * 90)
+        print(f"[{i}/{len(tickers)}] Zpracovávám {ticker}...")
+
+        try:
+            levels_df, trades_df, summary_df = run_backtest_for_ticker(ticker)
+
+            raw_df = load_ohlcv(ticker)
+            raw_rows = len(raw_df)
+
+            if levels_df.empty and trades_df.empty and summary_df.empty:
+                empty_count += 1
+                append_run_log_row(
+                    ticker=ticker,
+                    status="empty",
+                    elapsed_sec=time.time() - ticker_start,
+                    raw_rows=raw_rows,
+                    level_rows=0,
+                    trade_rows=0,
+                    summary_rows=0,
+                )
+                print(f"[{i}/{len(tickers)}] ⚠️ Bez výstupu pro {ticker}")
+            else:
+                success_count += 1
+
+                if not levels_df.empty:
+                    all_levels.append(levels_df)
+                if not trades_df.empty:
+                    all_trades.append(trades_df)
+                if not summary_df.empty:
+                    all_summary.append(summary_df)
+
+                append_run_log_row(
+                    ticker=ticker,
+                    status="ok",
+                    elapsed_sec=time.time() - ticker_start,
+                    raw_rows=raw_rows,
+                    level_rows=len(levels_df),
+                    trade_rows=len(trades_df),
+                    summary_rows=len(summary_df),
+                )
+
+                print(
+                    f"[{i}/{len(tickers)}] ✅ {ticker} | "
+                    f"raw: {raw_rows} | "
+                    f"levels: {len(levels_df)} | "
+                    f"trades: {len(trades_df)} | "
+                    f"summary: {len(summary_df)}"
+                )
+
+        except Exception as e:
+            failed_count += 1
+            append_run_log_row(
+                ticker=ticker,
+                status="error",
+                elapsed_sec=time.time() - ticker_start,
+                raw_rows=0,
+                level_rows=0,
+                trade_rows=0,
+                summary_rows=0,
+                error=str(e),
+            )
+            print(f"[{i}/{len(tickers)}] ❌ Chyba u {ticker}: {e}")
+
+        print_progress(
+            idx=i,
+            total=len(tickers),
+            ticker=ticker,
+            ticker_elapsed=time.time() - ticker_start,
+            started_at=started_at,
+        )
+
+    final_levels = pd.concat(all_levels, ignore_index=True) if all_levels else pd.DataFrame()
+    final_trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
+    final_summary = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()
+
+    if not final_levels.empty:
+        final_levels.to_csv(LEVELS_FILE, index=False)
+    if not final_trades.empty:
+        final_trades.to_csv(TRADES_FILE, index=False)
+    if not final_summary.empty:
+        final_summary.to_csv(SUMMARY_FILE, index=False)
+
+    print("\n" + "=" * 90)
+    print("📌 Souhrn běhu")
+    print(f"   Celkem tickerů: {len(tickers)}")
+    print(f"   Úspěšně zpracováno: {success_count}")
+    print(f"   Bez výstupu: {empty_count}")
+    print(f"   S chybou: {failed_count}")
+    print(f"   Level rows: {len(final_levels)}")
+    print(f"   Trade rows: {len(final_trades)}")
+    print(f"   Summary rows: {len(final_summary)}")
+    print(f"   Celkový čas: {format_seconds(time.time() - started_at)}")
+    print(f"   Log běhu: {RUN_LOG_FILE}")
+
+    if not final_trades.empty:
+        entered = final_trades["entry_date"].notna().sum() if "entry_date" in final_trades.columns else 0
+        print(f"   Obchody se vstupem: {entered}")
 
 
 if __name__ == "__main__":
