@@ -757,10 +757,10 @@ def main() -> None:
     )
     
     with st.expander("Dopad filtru na dataset", expanded=False):
-    st.write(
-        f"Po aktuálním filtru zůstalo **{filter_impact['filtered_trade_count']}** obchodů "
-        f"z původních **{filter_impact['all_trade_count']}** "
-        f"({filter_impact['kept_pct']:.1f} %)."
+        st.write(
+            f"Po aktuálním filtru zůstalo **{filter_impact['filtered_trade_count']}** obchodů "
+            f"z původních **{filter_impact['all_trade_count']}** "
+            f"({filter_impact['kept_pct']:.1f} %)."
     )
     st.dataframe(filter_impact_table, width="stretch", hide_index=True)
 
