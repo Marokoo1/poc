@@ -505,6 +505,95 @@ def build_active_filter_caption(
 
     return " | ".join(parts) if parts else "Bez filtru"
 
+def build_filter_impact_metrics(
+    all_trades: pd.DataFrame,
+    filtered_trades: pd.DataFrame,
+) -> dict:
+    all_real = all_trades[all_trades["entry_date"].notna()].copy()
+    filtered_real = filtered_trades[filtered_trades["entry_date"].notna()].copy()
+
+    all_trade_count = len(all_real)
+    filtered_trade_count = len(filtered_real)
+
+    all_ticker_count = all_real["ticker"].nunique() if "ticker" in all_real.columns else 0
+    filtered_ticker_count = filtered_real["ticker"].nunique() if "ticker" in filtered_real.columns else 0
+
+    filtered_long_count = 0
+    filtered_short_count = 0
+    if "side" in filtered_real.columns:
+        filtered_long_count = int((filtered_real["side"] == "long").sum())
+        filtered_short_count = int((filtered_real["side"] == "short").sum())
+
+    kept_pct = (filtered_trade_count / all_trade_count * 100) if all_trade_count else 0.0
+    filtered_out_pct = 100.0 - kept_pct if all_trade_count else 0.0
+
+    return {
+        "all_trade_count": int(all_trade_count),
+        "filtered_trade_count": int(filtered_trade_count),
+        "all_ticker_count": int(all_ticker_count),
+        "filtered_ticker_count": int(filtered_ticker_count),
+        "filtered_long_count": int(filtered_long_count),
+        "filtered_short_count": int(filtered_short_count),
+        "kept_pct": float(kept_pct),
+        "filtered_out_pct": float(filtered_out_pct),
+    }
+
+
+def build_filter_impact_table(
+    all_trades: pd.DataFrame,
+    filtered_trades: pd.DataFrame,
+) -> pd.DataFrame:
+    all_real = all_trades[all_trades["entry_date"].notna()].copy()
+    filtered_real = filtered_trades[filtered_trades["entry_date"].notna()].copy()
+
+    def _safe_pct(part: int, whole: int) -> float:
+        return (part / whole * 100.0) if whole else 0.0
+
+    all_total = len(all_real)
+    filtered_total = len(filtered_real)
+
+    all_long = int((all_real["side"] == "long").sum()) if "side" in all_real.columns else 0
+    all_short = int((all_real["side"] == "short").sum()) if "side" in all_real.columns else 0
+
+    filtered_long = int((filtered_real["side"] == "long").sum()) if "side" in filtered_real.columns else 0
+    filtered_short = int((filtered_real["side"] == "short").sum()) if "side" in filtered_real.columns else 0
+
+    all_tickers = int(all_real["ticker"].nunique()) if "ticker" in all_real.columns else 0
+    filtered_tickers = int(filtered_real["ticker"].nunique()) if "ticker" in filtered_real.columns else 0
+
+    rows = [
+        {
+            "metric": "Trades",
+            "full_dataset": all_total,
+            "filtered": filtered_total,
+            "removed": all_total - filtered_total,
+            "kept_pct": round(_safe_pct(filtered_total, all_total), 2),
+        },
+        {
+            "metric": "Long trades",
+            "full_dataset": all_long,
+            "filtered": filtered_long,
+            "removed": all_long - filtered_long,
+            "kept_pct": round(_safe_pct(filtered_long, all_long), 2),
+        },
+        {
+            "metric": "Short trades",
+            "full_dataset": all_short,
+            "filtered": filtered_short,
+            "removed": all_short - filtered_short,
+            "kept_pct": round(_safe_pct(filtered_short, all_short), 2),
+        },
+        {
+            "metric": "Tickers",
+            "full_dataset": all_tickers,
+            "filtered": filtered_tickers,
+            "removed": all_tickers - filtered_tickers,
+            "kept_pct": round(_safe_pct(filtered_tickers, all_tickers), 2),
+        },
+    ]
+
+    return pd.DataFrame(rows)
+
 def main() -> None:
     st.set_page_config(page_title="POC Backtest Dashboard", layout="wide")
     st.title("POC Backtest Dashboard")
@@ -599,6 +688,9 @@ def main() -> None:
         hold_range=global_hold_range,
         pnl_atr_range=global_pnl_atr_range,
     ).copy()
+    
+    filter_impact = build_filter_impact_metrics(real_trades, filtered_trades)
+    filter_impact_table = build_filter_impact_table(real_trades, filtered_trades)
 
     filtered_trades = filtered_trades.sort_values(
         ["entry_date", "ticker"], ascending=[False, True]
@@ -617,6 +709,26 @@ def main() -> None:
     )
 
     st.caption(f"Aktivní filtr: {active_filter_caption}")
+    top_a, top_b, top_c, top_d = st.columns(4)
+    top_a.metric(
+        "Obchodů po filtru",
+        f"{filter_impact['filtered_trade_count']:,}",
+        delta=f"{filter_impact['kept_pct']:.1f}% z full"
+    )
+    top_b.metric(
+        "Tickerů po filtru",
+        f"{filter_impact['filtered_ticker_count']:,}",
+        delta=f"{filter_impact['all_ticker_count']} full"
+    )
+    top_c.metric(
+        "Long / Short",
+        f"{filter_impact['filtered_long_count']} / {filter_impact['filtered_short_count']}"
+    )
+    top_d.metric(
+        "Odfiltrováno",
+        f"{filter_impact['filtered_out_pct']:.1f}%",
+        delta=f"-{filter_impact['all_trade_count'] - filter_impact['filtered_trade_count']} obchodů"
+    )
 
     # =========================
     # HORNÍ METRIKY Z FILTRU
@@ -643,6 +755,14 @@ def main() -> None:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["Summary", "Ticker summary", "Trades explorer", "Trade chart", "Equity"]
     )
+    
+    with st.expander("Dopad filtru na dataset", expanded=False):
+    st.write(
+        f"Po aktuálním filtru zůstalo **{filter_impact['filtered_trade_count']}** obchodů "
+        f"z původních **{filter_impact['all_trade_count']}** "
+        f"({filter_impact['kept_pct']:.1f} %)."
+    )
+    st.dataframe(filter_impact_table, width="stretch", hide_index=True)
 
     # =========================
     # TAB 1
