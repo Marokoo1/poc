@@ -447,6 +447,64 @@ def filter_trades_for_analysis(
 
     return df
 
+def build_summary_by_level_type(trades: pd.DataFrame) -> pd.DataFrame:
+    real = trades[trades["entry_date"].notna()].copy()
+    if real.empty:
+        return pd.DataFrame()
+
+    real["win"] = real["pnl_abs"] > 0
+
+    out = (
+        real.groupby("period_type", observed=False)
+        .agg(
+            trades=("period_type", "count"),
+            win_rate=("win", "mean"),
+            avg_pnl_abs=("pnl_abs", "mean"),
+            avg_pnl_atr=("pnl_atr", "mean"),
+            avg_hold=("bars_held", "mean"),
+        )
+        .reset_index()
+        .sort_values("period_type")
+    )
+
+    out["win_rate"] = (out["win_rate"] * 100).round(2)
+    return out
+
+
+def build_active_filter_caption(
+    ticker: str,
+    period_type: str,
+    side: str,
+    exit_reason: str,
+    trend_aligned: str,
+    year: str,
+    pnl_mode: str,
+    hold_range: tuple[int, int] | None,
+    pnl_atr_range: tuple[float, float] | None,
+) -> str:
+    parts = []
+
+    if ticker != "ALL":
+        parts.append(f"Ticker: {ticker}")
+    if period_type != "ALL":
+        parts.append(f"Period: {period_type}")
+    if side != "ALL":
+        parts.append(f"Side: {side}")
+    if exit_reason != "ALL":
+        parts.append(f"Exit: {exit_reason}")
+    if trend_aligned != "ALL":
+        parts.append(f"Trend aligned: {trend_aligned}")
+    if year != "ALL":
+        parts.append(f"Year: {year}")
+    if pnl_mode != "ALL":
+        parts.append(f"PnL: {pnl_mode}")
+    if hold_range is not None:
+        parts.append(f"Hold: {hold_range[0]}–{hold_range[1]}")
+    if pnl_atr_range is not None:
+        parts.append(f"PnL ATR: {pnl_atr_range[0]:.2f} až {pnl_atr_range[1]:.2f}")
+
+    return " | ".join(parts) if parts else "Bez filtru"
+
 def main() -> None:
     st.set_page_config(page_title="POC Backtest Dashboard", layout="wide")
     st.title("POC Backtest Dashboard")
