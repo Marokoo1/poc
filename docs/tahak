@@ -1,161 +1,49 @@
-# GitHub tahák pro projekt `poc`
+# Git tahák pro projekt `poc`
 
-## Stažení repa
+## Začátek práce
 
-Naklonovat repo:
-```bash
-git clone https://github.com/Marokoo1/poc.git
-```
-
-Vstoupit do složky repa:
-```bash
-cd poc
-```
-
-## Kontrola stavu
-
-Zjistit stav repa:
-```bash
-git status
-```
-
-Zjistit větev:
-```bash
-git branch
-```
-
-## Stažení nových změn
-
-Stáhnout nové změny z GitHubu:
 ```bash
 git pull origin main
-```
-
-Když pull nejde kvůli lokálním změnám:
-```bash
+git status
+Uložení změn
+Všechny změny
+git add .
+git commit -m "Popis zmen"
+git push origin main
+Jen konkrétní soubor
+git add src/poc_backtest.py
+git commit -m "Update poc_backtest.py"
+git push origin main
+Kontrola změn
+Stav repa
+git status
+Rozdíly
+git diff
+Rozdíly jen v jednom souboru
+git diff src/poc_backtest.py
+Krátká historie
+git log --oneline -n 10
+Když chceš zahodit změny
+Jeden soubor
+git restore src/poc_backtest.py
+Všechny necommitnuté změny
+git restore .
+Když git pull nejde kvůli lokálním změnám
 git stash
 git pull origin main
 git stash pop
-```
-
-## Uložení vlastních změn
-
-Přidat všechny změny:
-```bash
-git add .
-```
-
-Přidat jen jeden soubor:
-```bash
-git add src/main.py
-```
-
-Udělat commit:
-```bash
-git commit -m "Popis zmen"
-```
-
-Nahrát změny na GitHub:
-```bash
-git push origin main
-```
-
-Nejběžnější sekvence:
-```bash
+Doporučený pracovní rytmus
+Když začínáš
+git pull origin main
+git status
+Když končíš
+git status
 git add .
 git commit -m "Update project"
 git push origin main
-```
+Praktická poznámka pro tento projekt
 
-## Rozdíly a historie
+Před větší změnou v backtestu nebo dashboardu je rozumné si uložit zálohu:
 
-Ukázat změny:
-```bash
-git diff
-```
-
-Ukázat změny jen v jednom souboru:
-```bash
-git diff src/main.py
-```
-
-Krátká historie commitů:
-```bash
-git log --oneline
-```
-
-## Zahození změn
-
-Zahodit změny v jednom souboru:
-```bash
-git restore config/settings.yaml
-```
-
-Zahodit všechny necommitnuté změny:
-```bash
-git restore .
-```
-
-## Stash
-
-Dočasně schovat změny:
-```bash
-git stash
-```
-
-Vrátit schované změny:
-```bash
-git stash pop
-```
-
-Zobrazit seznam stashů:
-```bash
-git stash list
-```
-
-## Doporučený běžný postup
-
-Když začínáš práci:
-```bash
-git pull origin main
-git status
-```
-
-Když končíš práci:
-```bash
-git status
-git add .
-git commit -m "Popis zmen"
-git push origin main
-```
-
-## Mini tahák
-
-Stáhnout změny:
-```bash
-git pull origin main
-```
-
-Podívat se, co je změněné:
-```bash
-git status
-```
-
-Uložit své změny:
-```bash
-git add .
-git commit -m "Update"
-git push origin main
-```
-
-Když pull hlásí konflikt kvůli lokálním změnám:
-```bash
-git stash
-git pull origin main
-git stash pop
-```
-
-Když chceš zahodit změny v jednom souboru:
-```bash
-git restore nazev_souboru
-```
+cp src/poc_backtest.py src/poc_backtest.py.bak
+cp src/poc_backtest_dashboard.py src/poc_backtest_dashboard.py.bak
