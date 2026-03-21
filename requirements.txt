@@ -6,3 +6,5 @@ streamlit
 plotly
 yfinance
 pandas
+numpy
+python-dateutil
