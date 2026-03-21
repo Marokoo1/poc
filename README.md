@@ -1,41 +1,81 @@
-cat > README.md <<'EOF'
 # POC Project
 
-Projekt pro výpočet, vizualizaci a backtest Point of Control (POC) levelů nad lokálními OHLCV daty.
+Projekt pro výpočet, vizualizaci a backtest obchodních levelů nad lokálními OHLCV daty.
 
-## Co projekt aktuálně dělá
+Aktuální zaměření projektu:
+- historický výpočet a testování **POC (Point of Control)** levelů
+- rozšíření backtestu o **IB (Initial Balance)** levely
+- porovnání režimů:
+  - **POC**
+  - **IB**
+  - **POC + IB confluence**
+- příprava podkladů pro další krok:
+  - **paper trading přes IB Gateway / TWS**
 
-- načítá raw OHLCV data z `data/raw/*.csv`
-- počítá POC levely po tickeru
-- ukládá POC levely do `data/processed/*_poc.csv`
-- vytváří enriched přehled levelů v `data/processed/poc_levels_enriched.csv`
-- umožňuje vizuální kontrolu levelů v dashboardu
-- provádí historický backtest POC návratů v `src/poc_backtest.py`
-- ukládá backtest výstupy do:
-  - `data/processed/poc_backtest_levels.csv`
-  - `data/processed/poc_backtest_trades.csv`
-  - `data/processed/poc_backtest_summary.csv`
+---
 
-## Hlavní logika backtestu
+## Hlavní cíl projektu
 
-Aktuální verze backtestu už nepoužívá slepé vstupy hned po uzavření periody.
+Cílem není jen vypočítat levely, ale ověřit, zda jsou obchodovatelné v systematické podobě.
 
-Nová logika obsahuje:
+Projekt má odpovědět hlavně na tyto otázky:
+- fungují samotné **POC** levely?
+- fungují samotné **IB** levely?
+- přináší **konfluence POC + IB** lepší výsledky než samotné POC?
+- jaká logika vstupu, invalidace a řízení obchodu je realisticky obchodovatelná?
 
-- **departure filter**  
-  level je obchodovatelný až poté, co cena od POC odejde o nastavitelnou vzdálenost
+---
 
-- **clean touch logic**  
-  vstup se bere jen při čistém návratu k levelu
+## Co projekt aktuálně řeší
 
-- **gap-cross invalidation**  
-  pokud cena gapne skrz level, obchod se neotevře opačným směrem
+### 1. Výpočet levelů
+Projekt pracuje nad lokálními OHLCV daty uloženými v projektu a počítá:
+- POC levely po definovaných periodách
+- historické levely pro backtest
+- pomocné výstupy pro dashboard a kontrolu logiky
 
-- **rotation filter**  
-  pokud se cena kolem POC začne jen točit, level se vyřadí
+### 2. Historický backtest
+Backtest vrstva testuje návraty ceny k levelům a obsahuje postupně laděnou logiku:
+- aktivace levelu až po odchodu ceny od levelu
+- clean touch / valid touch logiku
+- invalidaci po nevhodném průrazu nebo gap-cross situaci
+- omezení na první validní test
+- filtrování a porovnávání výsledků podle typu levelu
 
-- **first valid touch only**  
-  obchoduje se jen první validní návrat k levelu
+### 3. Vizualizace a kontrola
+Projekt obsahuje dashboardy pro:
+- kontrolu levelů v grafu
+- procházení historických obchodů
+- filtrování výsledků backtestu
+- porovnávání period, směrů a typů levelů
+
+### 4. Rozpracované rozšíření o IB
+Další vývojová větev přidává:
+- roční IB
+- měsíční IB
+- standardní projekce
+- volitelné fib projekce
+- test režimů:
+  - POC-only
+  - IB-only
+  - POC+IB confluence
+
+---
+
+## Aktuální stav projektu
+
+Projekt je ve fázi:
+1. lokální výpočet a backtest levelů z CSV / raw dat
+2. průběžné ladění logiky levelů a vstupů
+3. rozšíření o IB
+4. příprava na další etapu:
+   **napojení paper tradingu na IB Gateway**
+
+Je důležité:
+- nejdřív dokončit a ověřit historický backtest
+- teprve potom přenášet logiku do paper trading workflow
+
+---
 
 ## Struktura projektu
 
@@ -43,11 +83,15 @@ Nová logika obsahuje:
 poc/
 ├── config/
 ├── docs/
+│   ├── MANUAL.md
+│   ├── next_steps.md
+│   ├── notes.md
+│   ├── plan.md
+│   ├── tahak
+│   └── todo.md
 ├── input/
 │   └── watchlists/
-├── data/
-│   ├── raw/
-│   └── processed/
+├── poc/
 ├── src/
 │   ├── main.py
 │   ├── poc_calculator.py
@@ -61,9 +105,3 @@ poc/
 │   └── config.py
 ├── README.md
 └── requirements.txt
-
-
-python3 src/poc_signals.py
-python3 src/poc_backtest.py
-streamlit run src/poc_dashboard.py
-streamlit run src/poc_backtest_dashboard.py
