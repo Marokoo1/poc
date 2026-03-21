@@ -499,6 +499,9 @@ def build_active_filter_caption(
     pnl_mode: str,
     hold_range: tuple[int, int] | None,
     pnl_atr_range: tuple[float, float] | None,
+    signal_mode: str = "ALL",
+    level_source: str = "ALL",
+    confluence_mode: str = "ALL",
 ) -> str:
     parts = []
 
@@ -520,6 +523,12 @@ def build_active_filter_caption(
         parts.append(f"Hold: {hold_range[0]}–{hold_range[1]}")
     if pnl_atr_range is not None:
         parts.append(f"PnL ATR: {pnl_atr_range[0]:.2f} až {pnl_atr_range[1]:.2f}")
+    if signal_mode != "ALL":
+        parts.append(f"Signal mode: {signal_mode}")
+    if level_source != "ALL":
+        parts.append(f"Level source: {level_source}")
+    if confluence_mode != "ALL":
+        parts.append(f"Confluence: {confluence_mode}")
 
     return " | ".join(parts) if parts else "Bez filtru"
 
