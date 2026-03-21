@@ -9,6 +9,7 @@ import pandas as pd
 import time
 
 from poc_calculator import calculate_period_poc, filter_complete_periods
+from ib_calculator import calculate_all_ib_levels
 
 # ============================================================
 # PATHS
@@ -100,6 +101,27 @@ EMA_SLOW = 200
 
 INCLUDE_PERIODS = ( "monthly", "yearly") #"weekly",
 MIN_LEVEL_AGE_BARS = 3
+
+# ============================================================
+# SIGNAL / CONFLUENCE MODES
+# ============================================================
+SIGNAL_MODE = "poc"  # "poc", "ib", "poc_ib", "ib_poc"
+CONFLUENCE_MAX_ATR = 0.35
+ALLOW_IB_CORE = True
+ALLOW_IB_STANDARD = True
+ALLOW_IB_FIB = False
+
+IB_SETTINGS = {
+    "enabled": True,
+    "yearly_enabled": True,
+    "monthly_enabled": True,
+    "monthly_mode": "first_5_trading_days",
+    "hold_until_tested": True,
+    "standard_projection_enabled": True,
+    "standard_multipliers": [1.0, 1.5, 2.0, 3.0],
+    "fibonacci_projection_enabled": False,
+    "fibonacci_multipliers": [0.618, 1.0, 1.272, 1.618, 2.618],
+}
 
 
 # ============================================================
@@ -317,7 +339,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 
-def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFrame:
+def build_poc_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
     for period_type in INCLUDE_PERIODS:
@@ -331,10 +353,13 @@ def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataF
 
         poc_df["Ticker"] = ticker
         poc_df["PeriodType"] = period_type
+        poc_df["LevelSource"] = "POC"
+        poc_df["LevelFamily"] = "poc"
+        poc_df["LevelName"] = "POC"
+        poc_df["LevelPrice"] = pd.to_numeric(poc_df["POC"], errors="coerce")
         poc_df["PeriodStart"] = pd.to_datetime(poc_df["PeriodStart"], errors="coerce")
         poc_df["PeriodEnd"] = pd.to_datetime(poc_df["PeriodEnd"], errors="coerce")
         poc_df["ActiveFrom"] = poc_df["PeriodEnd"] + pd.Timedelta(days=1)
-
         frames.append(poc_df)
 
     if not frames:
@@ -342,6 +367,47 @@ def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataF
 
     out = pd.concat(frames, ignore_index=True)
     out = out.sort_values(["ActiveFrom", "PeriodType", "Period"]).reset_index(drop=True)
+    return out
+
+
+def build_ib_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFrame:
+    if not IB_SETTINGS.get("enabled", False):
+        return pd.DataFrame()
+
+    ib_df = calculate_all_ib_levels(price_df.copy(), ticker=ticker, settings=IB_SETTINGS)
+    if ib_df.empty:
+        return pd.DataFrame()
+
+    if not ALLOW_IB_CORE:
+        ib_df = ib_df[ib_df["LevelFamily"] != "ib_core"].copy()
+    if not ALLOW_IB_STANDARD:
+        ib_df = ib_df[ib_df["LevelFamily"] != "ib_standard"].copy()
+    if not ALLOW_IB_FIB:
+        ib_df = ib_df[ib_df["LevelFamily"] != "ib_fib"].copy()
+
+    if ib_df.empty:
+        return pd.DataFrame()
+
+    ib_df["POC"] = pd.to_numeric(ib_df["LevelPrice"], errors="coerce")
+    ib_df = ib_df.sort_values(["ActiveFrom", "PeriodType", "Period", "LevelPrice"]).reset_index(drop=True)
+    return ib_df
+
+
+def build_all_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFrame:
+    poc_levels = build_poc_levels_for_ticker(ticker, price_df)
+    ib_levels = build_ib_levels_for_ticker(ticker, price_df)
+
+    frames = [df for df in [poc_levels, ib_levels] if not df.empty]
+    if not frames:
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    if "LevelPrice" not in out.columns and "POC" in out.columns:
+        out["LevelPrice"] = pd.to_numeric(out["POC"], errors="coerce")
+    if "POC" not in out.columns and "LevelPrice" in out.columns:
+        out["POC"] = pd.to_numeric(out["LevelPrice"], errors="coerce")
+
+    out = out.sort_values(["ActiveFrom", "PeriodType", "Period", "LevelPrice"]).reset_index(drop=True)
     return out
 
 
@@ -460,10 +526,22 @@ def compute_mfe_mae(window: pd.DataFrame, entry: float, side: str) -> tuple[floa
     return round(mfe, 6), round(mae, 6)
 
 
+def normalize_period_type(period_type: str) -> str:
+    pt = str(period_type).lower()
+    if pt.startswith("weekly"):
+        return "weekly"
+    if pt.startswith("monthly"):
+        return "monthly"
+    if pt.startswith("yearly"):
+        return "yearly"
+    return pt
+
+
 def get_period_params(period_type: str) -> dict:
-    if period_type not in PERIOD_PARAMS:
+    normalized = normalize_period_type(period_type)
+    if normalized not in PERIOD_PARAMS:
         raise ValueError(f"Neznámé PeriodType pro params: {period_type}")
-    return PERIOD_PARAMS[period_type]
+    return PERIOD_PARAMS[normalized]
 
 def compute_activation_threshold(level: float, atr: float, mode: str, value: float) -> float:
     mode = str(mode).lower()
@@ -511,7 +589,7 @@ def infer_level_side_at_active_from(level_row: pd.Series, ohlcv: pd.DataFrame) -
         return "unknown"
 
     close_px = float(row["Close"])
-    level = float(level_row["POC"])
+    level = float(level_row.get("LevelPrice", level_row.get("POC")))
     return infer_side_from_activation(close_px, level)
 
 
@@ -528,11 +606,75 @@ def get_level_atr_at_active_from(level_row: pd.Series, ohlcv: pd.DataFrame) -> f
 
 
 def apply_level_supersession(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
-    if levels.empty or not SUPERSESSION_ENABLED:
+    if levels.empty:
         out = levels.copy()
         if "ValidUntil" not in out.columns:
             out["ValidUntil"] = pd.NaT
         return out
+
+    out = levels.copy()
+    out["ActiveFrom"] = pd.to_datetime(out["ActiveFrom"], errors="coerce")
+    if "ValidUntil" not in out.columns:
+        out["ValidUntil"] = pd.NaT
+
+    if not SUPERSESSION_ENABLED:
+        return out
+
+    poc_mask = out["LevelSource"].fillna("POC").astype(str).str.upper() == "POC"
+    poc_levels = out.loc[poc_mask].copy()
+    other_levels = out.loc[~poc_mask].copy()
+
+    if poc_levels.empty:
+        return out
+
+    poc_levels["level_side"] = poc_levels.apply(lambda r: infer_level_side_at_active_from(r, ohlcv), axis=1)
+    poc_levels["active_atr"] = poc_levels.apply(lambda r: get_level_atr_at_active_from(r, ohlcv), axis=1)
+
+    poc_levels = poc_levels.sort_values(["ActiveFrom", "PeriodType", "POC"]).reset_index(drop=True)
+
+    for new_idx in range(len(poc_levels)):
+        new_row = poc_levels.iloc[new_idx]
+
+        new_active_from = pd.Timestamp(new_row["ActiveFrom"])
+        new_period_type = normalize_period_type(str(new_row["PeriodType"]).lower())
+        new_side = str(new_row["level_side"]).lower()
+        new_poc = float(new_row["POC"])
+        new_atr = new_row["active_atr"]
+
+        if pd.isna(new_active_from) or new_side == "unknown":
+            continue
+
+        threshold_mult = float(SUPERSESSION_THRESHOLD_ATR.get(new_period_type, 1.0))
+        if pd.isna(new_atr) or new_atr is None or float(new_atr) <= 0:
+            continue
+
+        threshold_abs = float(new_atr) * threshold_mult
+
+        older_mask = (
+            (poc_levels.index < new_idx)
+            & (pd.to_datetime(poc_levels["ActiveFrom"], errors="coerce") < new_active_from)
+            & (poc_levels["PeriodType"].astype(str).apply(normalize_period_type) == new_period_type)
+            & (poc_levels["level_side"].astype(str).str.lower() == new_side)
+        )
+
+        if not older_mask.any():
+            continue
+
+        older_candidates = poc_levels.loc[older_mask].copy()
+        older_candidates["price_distance"] = (older_candidates["POC"].astype(float) - new_poc).abs()
+        same_zone = older_candidates["price_distance"] <= threshold_abs
+
+        if not same_zone.any():
+            continue
+
+        for old_idx in older_candidates.loc[same_zone].index.tolist():
+            old_valid_until = poc_levels.at[old_idx, "ValidUntil"]
+            if pd.isna(old_valid_until) or pd.Timestamp(new_active_from) < pd.Timestamp(old_valid_until):
+                poc_levels.at[old_idx, "ValidUntil"] = new_active_from
+
+    poc_levels = poc_levels.drop(columns=["level_side", "active_atr"], errors="ignore")
+    combined = pd.concat([poc_levels, other_levels], ignore_index=True, sort=False)
+    return combined.sort_values(["ActiveFrom", "PeriodType", "Period", "LevelPrice"]).reset_index(drop=True)
 
     out = levels.copy()
     out["ActiveFrom"] = pd.to_datetime(out["ActiveFrom"], errors="coerce")
@@ -638,7 +780,7 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     ticker = str(level_row["Ticker"])
     period_type = str(level_row["PeriodType"])
     period = str(level_row["Period"])
-    level = float(level_row["POC"])
+    level = float(level_row.get("LevelPrice", level_row.get("POC")))
     active_from = pd.Timestamp(level_row["ActiveFrom"])
     valid_until = pd.to_datetime(level_row.get("ValidUntil"), errors="coerce")
 
@@ -1007,6 +1149,80 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     )
 
 
+def build_signal_and_context_levels(all_levels: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    if all_levels.empty:
+        return pd.DataFrame(), pd.DataFrame(), SIGNAL_MODE
+
+    mode = str(SIGNAL_MODE).lower()
+    poc_mask = all_levels["LevelSource"].fillna("POC").astype(str).str.upper() == "POC"
+    ib_mask = all_levels["LevelSource"].fillna("").astype(str).str.upper() == "IB"
+
+    if mode == "poc":
+        return all_levels.loc[poc_mask].copy(), pd.DataFrame(), mode
+    if mode == "ib":
+        return all_levels.loc[ib_mask].copy(), pd.DataFrame(), mode
+    if mode == "poc_ib":
+        return all_levels.loc[poc_mask].copy(), all_levels.loc[ib_mask].copy(), mode
+    if mode == "ib_poc":
+        return all_levels.loc[ib_mask].copy(), all_levels.loc[poc_mask].copy(), mode
+
+    raise ValueError(f"Unknown SIGNAL_MODE: {SIGNAL_MODE}")
+
+
+def annotate_signal_levels_with_confluence(signal_levels: pd.DataFrame, context_levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    if signal_levels.empty:
+        return signal_levels.copy()
+
+    out = signal_levels.copy()
+    out["has_confluence"] = False
+    out["confluence_count"] = 0
+    out["nearest_confluence_distance_abs"] = np.nan
+    out["nearest_confluence_distance_atr"] = np.nan
+    out["nearest_confluence_level"] = np.nan
+    out["confluence_sources"] = ""
+
+    if context_levels.empty:
+        return out
+
+    context = context_levels.copy()
+    context["ActiveFrom"] = pd.to_datetime(context["ActiveFrom"], errors="coerce")
+    if "ValidUntil" in context.columns:
+        context["ValidUntil"] = pd.to_datetime(context["ValidUntil"], errors="coerce")
+    else:
+        context["ValidUntil"] = pd.NaT
+
+    for idx, row in out.iterrows():
+        active_from = pd.to_datetime(row.get("ActiveFrom"), errors="coerce")
+        level_price = pd.to_numeric(row.get("LevelPrice", row.get("POC")), errors="coerce")
+        atr = get_level_atr_at_active_from(row, ohlcv)
+        if pd.isna(active_from) or pd.isna(level_price) or atr is None or atr <= 0:
+            continue
+
+        eligible = context.loc[(context["ActiveFrom"] <= active_from) & ((context["ValidUntil"].isna()) | (context["ValidUntil"] > active_from))].copy()
+        if eligible.empty:
+            continue
+
+        eligible["distance_abs"] = (pd.to_numeric(eligible["LevelPrice"], errors="coerce") - float(level_price)).abs()
+        eligible = eligible.dropna(subset=["distance_abs"]).copy()
+        if eligible.empty:
+            continue
+
+        eligible["distance_atr"] = eligible["distance_abs"] / float(atr)
+        near = eligible.loc[eligible["distance_atr"] <= float(CONFLUENCE_MAX_ATR)].copy()
+        if near.empty:
+            continue
+
+        nearest = near.sort_values(["distance_atr", "distance_abs"]).iloc[0]
+        out.at[idx, "has_confluence"] = True
+        out.at[idx, "confluence_count"] = int(len(near))
+        out.at[idx, "nearest_confluence_distance_abs"] = float(nearest["distance_abs"])
+        out.at[idx, "nearest_confluence_distance_atr"] = float(nearest["distance_atr"])
+        out.at[idx, "nearest_confluence_level"] = float(nearest["LevelPrice"])
+        out.at[idx, "confluence_sources"] = ", ".join(sorted(near["LevelName"].astype(str).unique().tolist()))
+
+    return out
+
+
 def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ohlcv = load_ohlcv(ticker)
     if ohlcv.empty:
@@ -1014,21 +1230,64 @@ def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd
 
     ohlcv = add_indicators(ohlcv)
 
-    levels = build_all_levels_for_ticker(ticker, ohlcv)
-    if levels.empty:
+    all_levels = build_all_levels_for_ticker(ticker, ohlcv)
+    if all_levels.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    levels = apply_level_supersession(levels, ohlcv)
+    all_levels = apply_level_supersession(all_levels, ohlcv)
+    signal_levels, context_levels, signal_mode = build_signal_and_context_levels(all_levels)
+    signal_levels = annotate_signal_levels_with_confluence(signal_levels, context_levels, ohlcv)
 
-    trade_results: list[TradeResult] = []
-    for _, level_row in levels.iterrows():
-        trade_results.append(simulate_single_level(level_row, ohlcv))
+    if signal_mode in {"poc_ib", "ib_poc"}:
+        signal_levels = signal_levels.loc[signal_levels["has_confluence"] == True].copy()
 
-    trades = pd.DataFrame([asdict(t) for t in trade_results]) if trade_results else pd.DataFrame()
+    all_levels = all_levels.copy()
+    all_levels["signal_mode"] = signal_mode
+    all_levels["UsedAsSignal"] = False
+
+    if not signal_levels.empty:
+        signal_key = set(zip(
+            signal_levels["Ticker"].astype(str),
+            signal_levels["PeriodType"].astype(str),
+            signal_levels["Period"].astype(str),
+            signal_levels["LevelName"].astype(str),
+            signal_levels["LevelPrice"].round(8),
+            pd.to_datetime(signal_levels["ActiveFrom"], errors="coerce"),
+        ))
+        all_levels["UsedAsSignal"] = [
+            (str(r["Ticker"]), str(r["PeriodType"]), str(r["Period"]), str(r.get("LevelName", "")), round(float(r.get("LevelPrice", r.get("POC"))), 8), pd.to_datetime(r["ActiveFrom"], errors="coerce")) in signal_key
+            for _, r in all_levels.iterrows()
+        ]
+
+    trade_rows = []
+    for _, level_row in signal_levels.iterrows():
+        result = simulate_single_level(level_row, ohlcv)
+        row = asdict(result)
+        row["signal_mode"] = signal_mode
+        row["level_source"] = str(level_row.get("LevelSource", "POC"))
+        row["level_family"] = str(level_row.get("LevelFamily", "poc"))
+        row["level_name"] = str(level_row.get("LevelName", "POC"))
+        row["has_confluence"] = bool(level_row.get("has_confluence", False))
+        row["confluence_count"] = int(level_row.get("confluence_count", 0) or 0)
+        row["nearest_confluence_distance_abs"] = level_row.get("nearest_confluence_distance_abs")
+        row["nearest_confluence_distance_atr"] = level_row.get("nearest_confluence_distance_atr")
+        row["nearest_confluence_level"] = level_row.get("nearest_confluence_level")
+        row["confluence_sources"] = str(level_row.get("confluence_sources", ""))
+        trade_rows.append(row)
+
+    trades = pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame()
 
     if trades.empty:
         summary = pd.DataFrame()
-        return levels, trades, summary
+        return all_levels, trades, summary
+
+    summary = (
+        trades.groupby(["ticker", "signal_mode", "level_source", "period_type", "side", "exit_reason"], dropna=False)
+        .size()
+        .reset_index(name="count")
+    )
+
+    return all_levels, trades, summary
 
     summary = (
         trades.groupby(["ticker", "period_type", "side", "exit_reason"], dropna=False)
