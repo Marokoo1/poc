@@ -410,6 +410,9 @@ def filter_trades_for_analysis(
     pnl_mode: str = "ALL",
     hold_range: tuple[int, int] | None = None,
     pnl_atr_range: tuple[float, float] | None = None,
+    signal_mode: str = "ALL",
+    level_source: str = "ALL",
+    confluence_mode: str = "ALL",
 ) -> pd.DataFrame:
     df = trades.copy()
 
@@ -700,17 +703,20 @@ def main() -> None:
     )
 
     filtered_trades = filter_trades_for_analysis(
-        real_trades,
-        ticker=global_ticker,
-        period_type=global_period,
-        side=global_side,
-        exit_reason=global_exit,
-        trend_aligned=global_trend,
-        year=global_year,
-        pnl_mode=global_pnl_mode,
-        hold_range=global_hold_range,
-        pnl_atr_range=global_pnl_atr_range,
-    ).copy()
+    real_trades,
+    ticker=global_ticker,
+    period_type=global_period,
+    side=global_side,
+    exit_reason=global_exit,
+    trend_aligned=global_trend,
+    year=global_year,
+    pnl_mode=global_pnl_mode,
+    hold_range=global_hold_range,
+    pnl_atr_range=global_pnl_atr_range,
+    signal_mode=global_signal_mode,
+    level_source=global_level_source,
+    confluence_mode=global_confluence_mode,
+).copy()
     
     filter_impact = build_filter_impact_metrics(real_trades, filtered_trades)
     filter_impact_table = build_filter_impact_table(real_trades, filtered_trades)
