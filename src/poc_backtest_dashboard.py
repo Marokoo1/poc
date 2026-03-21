@@ -179,9 +179,12 @@ def build_trade_chart(ohlcv: pd.DataFrame, trade: pd.Series, history_bars: int =
             )
         )
 
+    level_name = trade['level_name'] if 'level_name' in trade.index else 'Level'
+    signal_mode = trade['signal_mode'] if 'signal_mode' in trade.index else ''
     title = (
         f"{trade['ticker']} | {trade['period_type']} | {trade['period']} | "
-        f"{trade['side']} | {trade['exit_reason']}"
+        f"{level_name} | {trade['side']} | {trade['exit_reason']}"
+        + (f" | mode={signal_mode}" if signal_mode else "")
     )
 
     fig.update_layout(
@@ -430,6 +433,18 @@ def filter_trades_for_analysis(
             df["entry_date"].dt.year.astype("Int64").astype(str) == year
         ]
 
+    if signal_mode != "ALL" and "signal_mode" in df.columns:
+        df = df[df["signal_mode"].astype(str) == signal_mode]
+
+    if level_source != "ALL" and "level_source" in df.columns:
+        df = df[df["level_source"].astype(str) == level_source]
+
+    if confluence_mode != "ALL" and "has_confluence" in df.columns:
+        if confluence_mode == "Confluence only":
+            df = df[df["has_confluence"] == True]
+        elif confluence_mode == "No confluence":
+            df = df[df["has_confluence"] != True]
+
     if pnl_mode == "Winners only":
         df = df[df["pnl_abs"] > 0]
     elif pnl_mode == "Losers only":
@@ -630,6 +645,9 @@ def main() -> None:
     if "entry_date" in real_trades.columns:
         year_values = sorted(real_trades["entry_date"].dropna().dt.year.astype(int).unique().tolist())
     years = ["ALL"] + [str(y) for y in year_values]
+    signal_modes = ["ALL"] + sorted(real_trades["signal_mode"].dropna().astype(str).unique().tolist()) if "signal_mode" in real_trades.columns else ["ALL"]
+    level_sources = ["ALL"] + sorted(real_trades["level_source"].dropna().astype(str).unique().tolist()) if "level_source" in real_trades.columns else ["ALL"]
+    confluence_modes = ["ALL", "Confluence only", "No confluence"] if "has_confluence" in real_trades.columns else ["ALL"]
 
     global_ticker = f1.selectbox("Ticker", tickers, key="global_ticker")
     global_period = f2.selectbox("Period type", period_types, key="global_period")
@@ -637,6 +655,11 @@ def main() -> None:
     global_exit = f4.selectbox("Exit reason", exit_reasons, key="global_exit")
     global_trend = f5.selectbox("Trend aligned", trend_flags, key="global_trend")
     global_year = f6.selectbox("Year", years, key="global_year")
+
+    fx1, fx2, fx3 = st.columns(3)
+    global_signal_mode = fx1.selectbox("Signal mode", signal_modes, key="global_signal_mode")
+    global_level_source = fx2.selectbox("Level source", level_sources, key="global_level_source")
+    global_confluence_mode = fx3.selectbox("Confluence", confluence_modes, key="global_confluence_mode")
 
     g1, g2, g3 = st.columns(3)
 
@@ -706,6 +729,9 @@ def main() -> None:
         pnl_mode=global_pnl_mode,
         hold_range=global_hold_range,
         pnl_atr_range=global_pnl_atr_range,
+        signal_mode=global_signal_mode,
+        level_source=global_level_source,
+        confluence_mode=global_confluence_mode,
     )
 
     st.caption(f"Aktivní filtr: {active_filter_caption}")
@@ -761,8 +787,8 @@ def main() -> None:
             f"Po aktuálním filtru zůstalo **{filter_impact['filtered_trade_count']}** obchodů "
             f"z původních **{filter_impact['all_trade_count']}** "
             f"({filter_impact['kept_pct']:.1f} %)."
-    )
-    st.dataframe(filter_impact_table, width="stretch", hide_index=True)
+        )
+        st.dataframe(filter_impact_table, width="stretch", hide_index=True)
 
     # =========================
     # TAB 1
@@ -852,6 +878,8 @@ def main() -> None:
                 + " | "
                 + chart_filtered["entry_date"].dt.strftime("%Y-%m-%d")
                 + " | "
+                + chart_filtered.get("level_name", pd.Series(["Level"] * len(chart_filtered))).astype(str)
+                + " | "
                 + chart_filtered["exit_reason"].astype(str)
                 + " | pnl="
                 + chart_filtered["pnl_abs"].round(2).astype(str)
@@ -925,8 +953,12 @@ def main() -> None:
 
             preview_cols = [
                 "ticker",
+                "signal_mode",
+                "level_source",
+                "level_name",
                 "period_type",
                 "side",
+                "has_confluence",
                 "entry_date",
                 "exit_date",
                 "exit_reason",
