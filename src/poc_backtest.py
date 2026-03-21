@@ -105,7 +105,7 @@ MIN_LEVEL_AGE_BARS = 3
 # ============================================================
 # SIGNAL / CONFLUENCE MODES
 # ============================================================
-SIGNAL_MODE = "poc"  # "poc", "ib", "poc_ib", "ib_poc"
+SIGNAL_MODE = "poc_ib"  # "poc", "ib", "poc_ib", "ib_poc"
 CONFLUENCE_MAX_ATR = 0.35
 ALLOW_IB_CORE = True
 ALLOW_IB_STANDARD = True
