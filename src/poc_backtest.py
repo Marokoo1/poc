@@ -1298,8 +1298,8 @@ def run_backtest_for_ticker_mode(
                 levels_out[col] = levels_out[sig_col].where(levels_out[sig_col].notna(), levels_out[col])
                 levels_out = levels_out.drop(columns=[sig_col])
         levels_out = levels_out.drop(columns=["_merge_price"])
-        levels_out["UsedAsSignal"] = levels_out["UsedAsSignal"].fillna(False).astype(bool)
-        levels_out["has_confluence"] = levels_out["has_confluence"].fillna(False).astype(bool)
+        levels_out["has_confluence"] = levels_out["has_confluence"].eq(True)
+        levels_out["UsedAsSignal"] = levels_out["UsedAsSignal"].eq(True)
         levels_out["confluence_count"] = pd.to_numeric(levels_out["confluence_count"], errors="coerce").fillna(0).astype(int)
 
     trade_rows = []
