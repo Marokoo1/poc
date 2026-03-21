@@ -1,61 +1,85 @@
-
-### 4) docs/plan.md
-
-```bash
-cat > docs/plan.md <<'EOF'
 # Plan
 
 ## Hlavní cíl projektu
 
-Vytvořit Python projekt pro práci s Point of Control (POC) levely nad historickými daty tak, aby šel použít pro:
+Vybudovat workflow pro systematické obchodování levelů, které bude:
+1. historicky otestované
+2. vizuálně ověřené
+3. přenositelné do paper tradingu přes IB Gateway
 
-- vizuální analýzu levelů
-- filtrování validních levelů
-- historický backtest návratů k POC
-- pozdější automatizaci
+---
 
-## Co už projekt umí
+## Fáze projektu
 
-- načítat historická data z CSV
-- počítat POC levely
-- exportovat levely do CSV
-- obohacovat levely o další kontext
-- zobrazovat levely v dashboardu
-- provádět historický backtest
-- zobrazovat backtest obchody v dashboardu
+### Fáze 1 — Základní datová a výpočetní vrstva
+- práce s lokálními OHLCV daty
+- výpočet POC
+- ukládání a opakované používání výsledků
 
-## Aktuální vývojová fáze
+### Fáze 2 — Historický backtest POC
+- aktivace levelu
+- clean touch logika
+- invalidace
+- první validní touch
+- dashboard pro kontrolu výsledků
 
-### Fáze 1 — hotovo
-- struktura projektu
-- načítání a čištění CSV
-- základní výpočet POC
-- export levelů
+### Fáze 3 — Rozšíření o IB
+- roční IB
+- měsíční IB
+- standardní projekce
+- volitelné fib projekce
+- samostatný IB režim
 
-### Fáze 2 — hotovo
-- enrichment logika nad levely
-- základní validace levelů
-- dashboard pro ruční kontrolu
+### Fáze 4 — Confluence test
+- POC-only
+- IB-only
+- POC+IB
+- vyhodnocení přínosu konfluence
 
-### Fáze 3 — rozpracováno
-- realističtější backtest vstupů
-- departure threshold
-- clean touch
-- gap-cross invalidace
-- rotation invalidace
+### Fáze 5 — Přenesení systému do paper tradingu
+- napojení na TWS / IB Gateway
+- čtení obchodních signálů
+- logika zadávání a správy obchodů
+- paper workflow
 
-### Fáze 4 — další krok
-- zpřísnění parametrů validního návratu
-- lepší konfigurace parametrů
-- další vizuální validace v dashboardu
+### Fáze 6 — Stabilizace a další automatizace
+- zjednodušení workflow
+- případná denní rutina
+- robustnější monitoring a provozní logika
 
-### Fáze 5 — později
-- oddělení parametrů do samostatného configu
-- lepší reporting
-- případné napojení na další datové zdroje
+---
 
-## Praktický směr
+## Co musí být jasné před paper tradingem
 
-Nejdřív chceme doladit logiku nad lokálními CSV daty.  
-Teprve potom dává smysl řešit další automatizaci nebo nové zdroje dat.
-EOF
+Než se začne řešit IB Gateway vrstva, musí být jasné:
+
+- jaké levely se budou obchodovat
+- jaké filtry jsou povinné
+- co je vstupní podmínka
+- co je invalidace
+- kde je stop-loss
+- kde je profit target
+- co dělat při gapu nebo nevhodném průrazu
+- jaké typy obchodů chceme na paperu skutečně simulovat
+
+---
+
+## Aktuální pracovní priorita
+
+Teď je hlavní priorita:
+- dokončit POC + IB historický backtest
+- udělat férové srovnání režimů
+- rozhodnout, co má smysl převést do paper tradingu
+
+---
+
+## Pracovní zásada
+
+Projekt se má posouvat po vrstvách:
+
+1. výpočet
+2. backtest
+3. dashboard kontrola
+4. paper trading integrace
+
+Nepřeskakovat rovnou na exekuci bez potvrzené logiky.
