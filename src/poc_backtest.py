@@ -105,7 +105,7 @@ MIN_LEVEL_AGE_BARS = 3
 # ============================================================
 # SIGNAL / CONFLUENCE MODES
 # ============================================================
-SIGNAL_MODE = "poc_ib"  # "poc", "ib", "poc_ib", "ib_poc"
+SIGNAL_MODES = ["poc", "ib", "poc_ib"]  # available: "poc", "ib", "poc_ib", "ib_poc"
 CONFLUENCE_MAX_ATR = 0.35
 ALLOW_IB_CORE = True
 ALLOW_IB_STANDARD = True
@@ -1149,11 +1149,11 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     )
 
 
-def build_signal_and_context_levels(all_levels: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+def build_signal_and_context_levels(all_levels: pd.DataFrame, signal_mode: str) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     if all_levels.empty:
-        return pd.DataFrame(), pd.DataFrame(), SIGNAL_MODE
+        return pd.DataFrame(), pd.DataFrame(), str(signal_mode).lower()
 
-    mode = str(SIGNAL_MODE).lower()
+    mode = str(signal_mode).lower()
     poc_mask = all_levels["LevelSource"].fillna("POC").astype(str).str.upper() == "POC"
     ib_mask = all_levels["LevelSource"].fillna("").astype(str).str.upper() == "IB"
 
@@ -1166,7 +1166,23 @@ def build_signal_and_context_levels(all_levels: pd.DataFrame) -> tuple[pd.DataFr
     if mode == "ib_poc":
         return all_levels.loc[ib_mask].copy(), all_levels.loc[poc_mask].copy(), mode
 
-    raise ValueError(f"Unknown SIGNAL_MODE: {SIGNAL_MODE}")
+    raise ValueError(f"Unknown signal mode: {signal_mode}")
+
+
+def normalize_signal_modes() -> list[str]:
+    raw_modes = SIGNAL_MODES if isinstance(SIGNAL_MODES, (list, tuple, set)) else [SIGNAL_MODES]
+    modes: list[str] = []
+    for mode in raw_modes:
+        mode_str = str(mode).strip().lower()
+        if not mode_str:
+            continue
+        if mode_str not in {"poc", "ib", "poc_ib", "ib_poc"}:
+            raise ValueError(f"Unknown signal mode in SIGNAL_MODES: {mode}")
+        if mode_str not in modes:
+            modes.append(mode_str)
+    if not modes:
+        raise ValueError("SIGNAL_MODES is empty")
+    return modes
 
 
 def annotate_signal_levels_with_confluence(signal_levels: pd.DataFrame, context_levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
@@ -1223,41 +1239,68 @@ def annotate_signal_levels_with_confluence(signal_levels: pd.DataFrame, context_
     return out
 
 
-def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    ohlcv = load_ohlcv(ticker)
-    if ohlcv.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    ohlcv = add_indicators(ohlcv)
-
-    all_levels = build_all_levels_for_ticker(ticker, ohlcv)
-    if all_levels.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    all_levels = apply_level_supersession(all_levels, ohlcv)
-    signal_levels, context_levels, signal_mode = build_signal_and_context_levels(all_levels)
+def run_backtest_for_ticker_mode(
+    ticker: str,
+    ohlcv: pd.DataFrame,
+    base_levels: pd.DataFrame,
+    signal_mode: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    signal_levels, context_levels, signal_mode = build_signal_and_context_levels(base_levels, signal_mode)
     signal_levels = annotate_signal_levels_with_confluence(signal_levels, context_levels, ohlcv)
 
     if signal_mode in {"poc_ib", "ib_poc"}:
         signal_levels = signal_levels.loc[signal_levels["has_confluence"] == True].copy()
 
-    all_levels = all_levels.copy()
-    all_levels["signal_mode"] = signal_mode
-    all_levels["UsedAsSignal"] = False
+    levels_out = base_levels.copy()
+    levels_out["signal_mode"] = signal_mode
+    levels_out["UsedAsSignal"] = False
+    levels_out["has_confluence"] = False
+    levels_out["confluence_count"] = 0
+    levels_out["nearest_confluence_distance_abs"] = np.nan
+    levels_out["nearest_confluence_distance_atr"] = np.nan
+    levels_out["nearest_confluence_level"] = np.nan
+    levels_out["confluence_sources"] = ""
 
     if not signal_levels.empty:
-        signal_key = set(zip(
-            signal_levels["Ticker"].astype(str),
-            signal_levels["PeriodType"].astype(str),
-            signal_levels["Period"].astype(str),
-            signal_levels["LevelName"].astype(str),
-            signal_levels["LevelPrice"].round(8),
-            pd.to_datetime(signal_levels["ActiveFrom"], errors="coerce"),
-        ))
-        all_levels["UsedAsSignal"] = [
-            (str(r["Ticker"]), str(r["PeriodType"]), str(r["Period"]), str(r.get("LevelName", "")), round(float(r.get("LevelPrice", r.get("POC"))), 8), pd.to_datetime(r["ActiveFrom"], errors="coerce")) in signal_key
-            for _, r in all_levels.iterrows()
-        ]
+        merge_cols = ["Ticker", "PeriodType", "Period", "LevelName", "ActiveFrom"]
+        left = levels_out.copy()
+        left["_merge_price"] = pd.to_numeric(left.get("LevelPrice", left.get("POC")), errors="coerce").round(8)
+        right = signal_levels.copy()
+        right["_merge_price"] = pd.to_numeric(right.get("LevelPrice", right.get("POC")), errors="coerce").round(8)
+        levels_out = left.merge(
+            right[
+                merge_cols
+                + [
+                    "_merge_price",
+                    "has_confluence",
+                    "confluence_count",
+                    "nearest_confluence_distance_abs",
+                    "nearest_confluence_distance_atr",
+                    "nearest_confluence_level",
+                    "confluence_sources",
+                ]
+            ],
+            how="left",
+            on=merge_cols + ["_merge_price"],
+            suffixes=("", "_sig"),
+        )
+        levels_out["UsedAsSignal"] = levels_out["has_confluence"].notna() | levels_out["confluence_count"].notna()
+        for col in [
+            "has_confluence",
+            "confluence_count",
+            "nearest_confluence_distance_abs",
+            "nearest_confluence_distance_atr",
+            "nearest_confluence_level",
+            "confluence_sources",
+        ]:
+            sig_col = f"{col}_sig"
+            if sig_col in levels_out.columns:
+                levels_out[col] = levels_out[sig_col].where(levels_out[sig_col].notna(), levels_out[col])
+                levels_out = levels_out.drop(columns=[sig_col])
+        levels_out = levels_out.drop(columns=["_merge_price"])
+        levels_out["UsedAsSignal"] = levels_out["UsedAsSignal"].fillna(False).astype(bool)
+        levels_out["has_confluence"] = levels_out["has_confluence"].fillna(False).astype(bool)
+        levels_out["confluence_count"] = pd.to_numeric(levels_out["confluence_count"], errors="coerce").fillna(0).astype(int)
 
     trade_rows = []
     for _, level_row in signal_levels.iterrows():
@@ -1273,13 +1316,12 @@ def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd
         row["nearest_confluence_distance_atr"] = level_row.get("nearest_confluence_distance_atr")
         row["nearest_confluence_level"] = level_row.get("nearest_confluence_level")
         row["confluence_sources"] = str(level_row.get("confluence_sources", ""))
+        row["confluence_mode"] = "with_confluence" if bool(level_row.get("has_confluence", False)) else "without_confluence"
         trade_rows.append(row)
 
     trades = pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame()
-
     if trades.empty:
-        summary = pd.DataFrame()
-        return all_levels, trades, summary
+        return levels_out, trades, pd.DataFrame()
 
     summary = (
         trades.groupby(["ticker", "signal_mode", "level_source", "period_type", "side", "exit_reason"], dropna=False)
@@ -1287,86 +1329,40 @@ def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd
         .reset_index(name="count")
     )
 
-    return all_levels, trades, summary
-
-    summary = (
-        trades.groupby(["ticker", "period_type", "side", "exit_reason"], dropna=False)
-        .size()
-        .reset_index(name="count")
-    )
-
-    return levels, trades, summary
+    return levels_out, trades, summary
 
 
-def apply_daily_entry_limit(trades: pd.DataFrame, max_entries_per_day: int) -> pd.DataFrame:
-    if trades.empty or max_entries_per_day <= 0:
-        return trades
+def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ohlcv = load_ohlcv(ticker)
+    if ohlcv.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    df = trades.copy()
+    ohlcv = add_indicators(ohlcv)
 
-    if "entry_date" not in df.columns:
-        return df
+    base_levels = build_all_levels_for_ticker(ticker, ohlcv)
+    if base_levels.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    entered_mask = df["entry_date"].notna()
-    entered = df.loc[entered_mask].copy()
-    skipped = df.loc[~entered_mask].copy()
+    base_levels = apply_level_supersession(base_levels, ohlcv)
 
-    if entered.empty:
-        return df
+    mode_levels: list[pd.DataFrame] = []
+    mode_trades: list[pd.DataFrame] = []
+    mode_summaries: list[pd.DataFrame] = []
 
-    entered["entry_date"] = pd.to_datetime(entered["entry_date"], errors="coerce")
+    for signal_mode in normalize_signal_modes():
+        levels_out, trades, summary = run_backtest_for_ticker_mode(ticker, ohlcv, base_levels, signal_mode)
+        if not levels_out.empty:
+            mode_levels.append(levels_out)
+        if not trades.empty:
+            mode_trades.append(trades)
+        if not summary.empty:
+            mode_summaries.append(summary)
 
-    # Tvrdá priorita timeframe:
-    # yearly > monthly > weekly
-    period_priority = {"yearly": 0, "monthly": 1, "weekly": 2}
-    entered["period_priority"] = entered["period_type"].map(period_priority).fillna(999)
+    final_levels = pd.concat(mode_levels, ignore_index=True) if mode_levels else pd.DataFrame()
+    final_trades = pd.concat(mode_trades, ignore_index=True) if mode_trades else pd.DataFrame()
+    final_summary = pd.concat(mode_summaries, ignore_index=True) if mode_summaries else pd.DataFrame()
 
-    entered = entered.sort_values(
-        ["ticker", "entry_date", "period_priority"],
-        ascending=[True, True, True],
-    ).copy()
-
-    entered["entry_rank_in_day"] = (
-        entered.groupby(["ticker", "entry_date"]).cumcount() + 1
-    )
-
-    over_limit_mask = entered["entry_rank_in_day"] > max_entries_per_day
-
-    if over_limit_mask.any():
-        cols_to_null = [
-            "touch_date",
-            "entry_date",
-            "exit_date",
-            "entry_price",
-            "exit_price",
-            "stop_price",
-            "target_price",
-            "bars_held",
-            "pnl_abs",
-            "pnl_atr",
-            "return_pct",
-            "mfe_abs",
-            "mae_abs",
-        ]
-        for col in cols_to_null:
-            if col in entered.columns:
-                entered.loc[over_limit_mask, col] = np.nan
-
-        entered.loc[over_limit_mask, "trend_aligned"] = False
-        entered.loc[over_limit_mask, "exit_reason"] = DAILY_LIMIT_EXIT_REASON
-
-    entered = entered.drop(
-        columns=["entry_rank_in_day", "period_priority"],
-        errors="ignore",
-    )
-
-    out = pd.concat([entered, skipped], ignore_index=True)
-    out = out.sort_values(
-        ["ticker", "active_from", "period_type", "period"],
-        ascending=[True, True, True, True],
-    ).reset_index(drop=True)
-
-    return out
+    return final_levels, final_trades, final_summary
 
 
 def build_summary(trades: pd.DataFrame) -> pd.DataFrame:
