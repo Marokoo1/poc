@@ -140,7 +140,6 @@ def enrich_set_time_columns(levels: pd.DataFrame) -> pd.DataFrame:
     return out
 
 @st.cache_data(show_spinner=False, ttl=60)
-def load_yaml_settings@st.cache_data(show_spinner=False, ttl=60)
 def load_yaml_settings(settings_path: str) -> dict:
     path = Path(settings_path)
     if not path.exists():
