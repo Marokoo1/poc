@@ -118,8 +118,8 @@ IB_SIGNAL_FILTERS = {
     "enabled": False,
     "allowed_period_types": [],        # např. ["monthly_ib", "yearly_ib_fib"] ; [] = vše
     "allowed_level_families": [],      # corrected IB používá hlavně "ib"; [] = vše
-    "allowed_level_names": [],         # přesné názvy, např. ["M_IB_0", "M_IB_150", "M_IB_NEG150"]
-    "allowed_name_contains": [],       # částečné filtry, např. ["NEG", "M_IB_"]
+    "allowed_level_names": [],         # přesné názvy, např. ["M_IB_0", "M_IB_150", "M_IB_300", "M_IB_NEG150", "M_IB_NEG300"]
+    "allowed_name_contains": [],       # částečné filtry, např. ["NEG", "300", "M_IB_"]
 }
 
 # Konfigurace pro anotaci POC obchodů aktivní IB podporou
@@ -140,7 +140,7 @@ IB_SETTINGS = {
     "hold_until_tested": True,
     "standard_projection_enabled": True,
     # 0 a 100 jsou základ sady a dopočítají se uvnitř ib_calculator.py
-    "standard_multipliers": [1.5, 2.0],
+    "standard_multipliers": [1.5, 2.0, 3.0],
     "fibonacci_projection_enabled": False,
     "fibonacci_multipliers": [1.272, 1.618, 2.618],
 }
