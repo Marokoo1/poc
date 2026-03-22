@@ -376,6 +376,54 @@ def apply_confluence_filter(levels: pd.DataFrame, max_atr: float) -> pd.DataFram
     return pd.concat([poc.loc[sorted(keep_poc)], ib.loc[sorted(keep_ib)]], ignore_index=True)
 
 
+def format_level_badge(row: pd.Series) -> str:
+    source = str(row.get("Source", "")).upper()
+    period_type = str(row.get("PeriodType", "")).lower()
+    period = str(row.get("Period", "")).strip()
+    level_name = str(row.get("LevelName", "")).upper()
+
+    if source == "IB":
+        if "yearly" in period_type:
+            bucket = "Y"
+        else:
+            bucket = "M"
+
+        if level_name.endswith("IBH") or level_name.endswith("IBL"):
+            proj = "0"
+        elif "_100_UP" in level_name:
+            proj = "100"
+        elif "_150_UP" in level_name:
+            proj = "150"
+        elif "_200_UP" in level_name:
+            proj = "200"
+        elif "_300_UP" in level_name:
+            proj = "300"
+        elif "_100_DN" in level_name:
+            proj = "-100"
+        elif "_150_DN" in level_name:
+            proj = "-150"
+        elif "_200_DN" in level_name:
+            proj = "-200"
+        elif "_300_DN" in level_name:
+            proj = "-300"
+        else:
+            proj = level_name
+
+        return f"{bucket} {period} {proj}".strip()
+
+    # POC labels
+    if period_type == "weekly":
+        bucket = "W"
+    elif period_type == "monthly":
+        bucket = "M"
+    elif period_type == "yearly":
+        bucket = "Y"
+    else:
+        bucket = "P"
+
+    return f"{bucket} {period}".strip()
+
+
 def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
     ohlcv_idx = ohlcv.copy().set_index("Date")
     fig = go.Figure()
@@ -414,8 +462,10 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
             continue
         opacity = 0.95 if bool(row["Valid"]) else 0.35
         name = style["label"]
+        badge = format_level_badge(row)
         hover_text = (
             f"<b>{row['Source']} – {name}</b><br>"
+            f"Badge: {badge}<br>"
             f"Level: {row['LevelName']}<br>"
             f"Period: {row['Period']}<br>"
             f"Price: {float(row['LevelPrice']):.2f}<br>"
@@ -439,7 +489,7 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
             fig.add_annotation(
                 x=x1,
                 y=row["LevelPrice"],
-                text=f"{row['LevelName']} {float(row['LevelPrice']):.2f}",
+                text=badge,
                 showarrow=False,
                 xanchor="left",
                 xshift=8,
