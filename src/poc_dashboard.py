@@ -79,31 +79,52 @@ def enrich_set_time_columns(levels: pd.DataFrame) -> pd.DataFrame:
         out["SetMonth"] = pd.Series(dtype="Int64")
         out["SetLabel"] = pd.Series(dtype="string")
         out["IBGroup"] = pd.Series(dtype="string")
-        out["LevelFamily"] = out.get("LevelFamily", pd.Series(dtype="string"))
+        out["LevelFamily"] = pd.Series(dtype="string")
         return out
 
     out = levels.copy()
-    base_time = pd.to_datetime(out.get("PeriodStart"), errors="coerce")
-    if "AnchorStart" in out.columns:
-        anchor_time = pd.to_datetime(out["AnchorStart"], errors="coerce")
-        base_time = base_time.fillna(anchor_time)
-    if "ActiveFrom" in out.columns:
-        active_time = pd.to_datetime(out["ActiveFrom"], errors="coerce")
-        base_time = base_time.fillna(active_time)
 
-    out["SetYear"] = base_time.dt.year.astype("Int64")
-    out["SetMonth"] = base_time.dt.month.astype("Int64")
+    def parse_set_year_month(row: pd.Series):
+        period_type = str(row.get("PeriodType", "")).lower().strip()
+        period = str(row.get("Period", "")).strip()
+
+        if "yearly" in period_type:
+            try:
+                return int(period[:4]), pd.NA
+            except Exception:
+                pass
+
+        if "monthly" in period_type:
+            m = re.match(r"^(\d{4})-(\d{1,2})$", period)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+
+        base_time = pd.NaT
+        for col in ["PeriodStart", "AnchorStart", "ActiveFrom"]:
+            if col in row and pd.notna(row.get(col)):
+                base_time = pd.to_datetime(row.get(col), errors="coerce")
+                if pd.notna(base_time):
+                    break
+        if pd.notna(base_time):
+            year = int(base_time.year)
+            month = int(base_time.month) if "monthly" in period_type else pd.NA
+            return year, month
+
+        return pd.NA, pd.NA
+
+    parsed = out.apply(parse_set_year_month, axis=1, result_type="expand")
+    out["SetYear"] = parsed[0].astype("Int64")
+    out["SetMonth"] = parsed[1].astype("Int64")
 
     def make_set_label(row: pd.Series) -> str:
         period_type = str(row.get("PeriodType", "")).lower()
         year = row.get("SetYear")
         month = row.get("SetMonth")
-        period = str(row.get("Period", "")).strip()
         if pd.notna(year) and "monthly" in period_type and pd.notna(month):
             return f"{int(year):04d}-{int(month):02d}"
         if pd.notna(year) and "yearly" in period_type:
             return f"{int(year):04d}"
-        return period
+        return str(row.get("Period", "")).strip()
 
     out["SetLabel"] = out.apply(make_set_label, axis=1)
 
@@ -119,6 +140,7 @@ def enrich_set_time_columns(levels: pd.DataFrame) -> pd.DataFrame:
     return out
 
 @st.cache_data(show_spinner=False, ttl=60)
+def load_yaml_settings@st.cache_data(show_spinner=False, ttl=60)
 def load_yaml_settings(settings_path: str) -> dict:
     path = Path(settings_path)
     if not path.exists():
@@ -387,7 +409,11 @@ def filter_unified_levels(levels: pd.DataFrame, settings: ChartSettings) -> pd.D
         data = data[data["SetYear"].isin(settings.selected_years)]
 
     if settings.selected_months and "SetMonth" in data.columns:
-        data = data[data["SetMonth"].isin(settings.selected_months)]
+        monthly_mask = data["PeriodType"].astype(str).str.contains("monthly", case=False, na=False)
+        data = pd.concat([
+            data[~monthly_mask],
+            data[monthly_mask & data["SetMonth"].isin(settings.selected_months)],
+        ], ignore_index=True)
 
     if settings.level_status == "Only active":
         data = data[data["Valid"]]
@@ -436,35 +462,28 @@ def format_level_badge(row: pd.Series) -> str:
     level_name = str(row.get("LevelName", "")).upper()
 
     if source == "IB":
-        if "yearly" in period_type:
-            bucket = "Y"
-        else:
-            bucket = "M"
+        if level_name.endswith("IBL"):
+            return "0"
+        if level_name.endswith("IBH"):
+            return "100"
+        if "_150_UP" in level_name:
+            return "150"
+        if "_200_UP" in level_name:
+            return "200"
+        if "_300_UP" in level_name:
+            return "300"
+        if "_150_DN" in level_name:
+            return "-150"
+        if "_200_DN" in level_name:
+            return "-200"
+        if "_300_DN" in level_name:
+            return "-300"
+        if "_100_UP" in level_name:
+            return "100?"
+        if "_100_DN" in level_name:
+            return "-100?"
+        return level_name
 
-        if level_name.endswith("IBH") or level_name.endswith("IBL"):
-            proj = "0"
-        elif "_100_UP" in level_name:
-            proj = "100"
-        elif "_150_UP" in level_name:
-            proj = "150"
-        elif "_200_UP" in level_name:
-            proj = "200"
-        elif "_300_UP" in level_name:
-            proj = "300"
-        elif "_100_DN" in level_name:
-            proj = "-100"
-        elif "_150_DN" in level_name:
-            proj = "-150"
-        elif "_200_DN" in level_name:
-            proj = "-200"
-        elif "_300_DN" in level_name:
-            proj = "-300"
-        else:
-            proj = level_name
-
-        return f"{bucket} {str(row.get('SetLabel', period)).strip()} {proj}".strip()
-
-    # POC labels
     if period_type == "weekly":
         bucket = "W"
     elif period_type == "monthly":
@@ -476,8 +495,7 @@ def format_level_badge(row: pd.Series) -> str:
 
     return f"{bucket} {period}".strip()
 
-
-def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
+def build_chart(def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
     ohlcv_idx = ohlcv.copy().set_index("Date")
     fig = go.Figure()
     history_start = ohlcv_idx.index.max() - pd.DateOffset(months=settings.months_back)
@@ -667,17 +685,12 @@ def sidebar_controls(sources: dict[str, DataSource], default_source: str, ticker
         IB_PERIODS,
         default=["monthly_ib", "yearly_ib", "monthly_ib_std", "yearly_ib_std"],
     )
-    selected_ib_families = st.sidebar.multiselect(
-        "IB rodiny",
-        IB_FAMILIES,
-        default=["ib_core", "ib_standard"],
-    )
     available_years = list(range(2000, 2036))
     selected_years = st.sidebar.multiselect("Rok sady", available_years, default=available_years)
     month_options = list(range(1, 13))
     selected_months = st.sidebar.multiselect("Měsíc sady", month_options, default=month_options)
     level_status = st.sidebar.selectbox("Stav levelu", ["All", "Only active", "Only tested"], index=0)
-    nearest_only = st.sidebar.checkbox("Zobrazit jen nejbližší levely", value=True)
+    nearest_only = st.sidebar.checkbox("Zobrazit jen nejbližší levely", value=False)
     nearest_count = st.sidebar.slider("Počet nejbližších levelů", 1, 20, 8)
     months_back = st.sidebar.slider("Kolik měsíců historie v grafu", 3, 48, 12)
     show_labels = st.sidebar.checkbox("Popisky levelů vpravo", value=True)
