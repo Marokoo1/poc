@@ -379,54 +379,105 @@ def prepare_ib_levels(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame
 def filter_unified_levels(levels: pd.DataFrame, settings: ChartSettings) -> pd.DataFrame:
     if levels.empty:
         return levels.copy()
+
     data = levels.copy()
 
-    allowed_sources: list[str]
+    # -------------------------------------------------
+    # Source mode
+    # -------------------------------------------------
     if settings.display_mode == "POC":
         allowed_sources = ["POC"]
     elif settings.display_mode == "IB":
         allowed_sources = ["IB"]
     else:
         allowed_sources = ["POC", "IB"]
-    data = data[data["Source"].isin(allowed_sources)]
 
+    data = data[data["Source"].isin(allowed_sources)].copy()
+
+    # -------------------------------------------------
+    # POC period filter
+    # -------------------------------------------------
     if "POC" in allowed_sources:
         poc_mask = data["Source"].eq("POC")
-        data = pd.concat([
-            data[poc_mask & data["PeriodType"].isin(settings.selected_poc_periods)],
-            data[~poc_mask],
-        ], ignore_index=True)
+        data = pd.concat(
+            [
+                data[poc_mask & data["PeriodType"].isin(settings.selected_poc_periods)],
+                data[~poc_mask],
+            ],
+            ignore_index=True,
+        )
 
+    # -------------------------------------------------
+    # IB type filter
+    # -------------------------------------------------
     if "IB" in allowed_sources:
         ib_mask = data["Source"].eq("IB")
         ib_data = data[ib_mask].copy()
+
         if settings.selected_ib_periods:
-            ib_data = ib_data[ib_data["PeriodType"].isin(settings.selected_ib_periods)]
+            ib_data = ib_data[ib_data["PeriodType"].isin(settings.selected_ib_periods)].copy()
+
+        # -------------------------------------------------
+        # STRICT YEAR / MONTH FILTER BASED ON PERIOD STRING
+        # yearly: Period = "2025"
+        # monthly: Period = "2025-06"
+        # -------------------------------------------------
+        def _match_period(row: pd.Series) -> bool:
+            period_type = str(row.get("PeriodType", "")).lower().strip()
+            period = str(row.get("Period", "")).strip()
+
+            if "yearly" in period_type:
+                try:
+                    y = int(period[:4])
+                except Exception:
+                    return False
+                return y in settings.selected_years if settings.selected_years else True
+
+            if "monthly" in period_type:
+                try:
+                    parts = period.split("-")
+                    y = int(parts[0])
+                    m = int(parts[1])
+                except Exception:
+                    return False
+
+                year_ok = y in settings.selected_years if settings.selected_years else True
+                month_ok = m in settings.selected_months if settings.selected_months else True
+                return year_ok and month_ok
+
+            return True
+
+        ib_data = ib_data[ib_data.apply(_match_period, axis=1)].copy()
+
         data = pd.concat([data[~ib_mask], ib_data], ignore_index=True)
 
-    if settings.selected_years and "SetYear" in data.columns:
-        data = data[data["SetYear"].isin(settings.selected_years)]
-
-    if settings.selected_months and "SetMonth" in data.columns:
-        monthly_mask = data["PeriodType"].astype(str).str.contains("monthly", case=False, na=False)
-        data = pd.concat([
-            data[~monthly_mask],
-            data[monthly_mask & data["SetMonth"].isin(settings.selected_months)],
-        ], ignore_index=True)
-
+    # -------------------------------------------------
+    # Level status
+    # -------------------------------------------------
     if settings.level_status == "Only active":
-        data = data[data["Valid"]]
+        data = data[data["Valid"]].copy()
     elif settings.level_status == "Only tested":
-        data = data[~data["Valid"]]
+        data = data[~data["Valid"]].copy()
 
+    # -------------------------------------------------
+    # Confluence only
+    # -------------------------------------------------
     if settings.display_mode == "POC + IB" and settings.show_confluence_only:
         data = apply_confluence_filter(data, settings.confluence_max_atr)
 
+    # -------------------------------------------------
+    # Nearest only
+    # -------------------------------------------------
     if settings.nearest_only and not data.empty:
-        data = data.nsmallest(settings.nearest_count, ["AbsDist", "PeriodRank"])
+        data = data.nsmallest(settings.nearest_count, ["AbsDist", "PeriodRank"]).copy()
 
-    return data.sort_values(["Source", "PeriodRank", "AbsDist", "AnchorStart"], ascending=[True, True, True, False]).reset_index(drop=True)
-
+    return (
+        data.sort_values(
+            ["Source", "PeriodRank", "AbsDist", "AnchorStart"],
+            ascending=[True, True, True, False],
+        )
+        .reset_index(drop=True)
+    )
 
 def apply_confluence_filter(levels: pd.DataFrame, max_atr: float) -> pd.DataFrame:
     if levels.empty:
