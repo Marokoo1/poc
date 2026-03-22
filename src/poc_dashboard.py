@@ -494,7 +494,7 @@ def format_level_badge(row: pd.Series) -> str:
 
     return f"{bucket} {period}".strip()
 
-def build_chart(def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
+def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
     ohlcv_idx = ohlcv.copy().set_index("Date")
     fig = go.Figure()
     history_start = ohlcv_idx.index.max() - pd.DateOffset(months=settings.months_back)
