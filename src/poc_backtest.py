@@ -114,7 +114,7 @@ ALLOW_IB_FIB = False
 
 # Samostatný filtr pro IB standalone backtest
 IB_SIGNAL_FILTERS = {
-    "enabled": True,
+    "enabled": False,
     "allowed_period_types": [],        # např. ["monthly_ib", "yearly_ib_std"] ; [] = vše
     "allowed_level_families": [],      # např. ["ib_core", "ib_standard"] ; [] = vše
     "allowed_level_names": [],         # přesné názvy, např. ["M_IBL", "M_IB_150_DN"]
