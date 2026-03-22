@@ -453,7 +453,7 @@ def sidebar_controls(source: DataSource, tickers: Iterable[str]) -> tuple[str, C
         "monthly_enabled": True,
         "monthly_mode": "first_5_trading_days",
         "standard_projection_enabled": True,
-        "standard_multipliers": [1.5, 2.0],
+        "standard_multipliers": [1.5, 2.0, 3.0],
         "fibonacci_projection_enabled": False,
         "fibonacci_multipliers": [1.272, 1.618],
     }
