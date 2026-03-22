@@ -108,7 +108,7 @@ MIN_LEVEL_AGE_BARS = 3
 SIGNAL_MODES = ["poc", "ib"]  # available: "poc", "ib"
 
 # IB je teď jedna sada levelů. Není zvlášť "core" a "standard".
-# Standardní sada znamená: 0, 100, 150, 200, 300, -150, -200, -300
+# Standardní sada znamená: 0, 100, 150, 200, -150, -200
 # Fib zůstává volitelně oddělený přes period_type *_fib.
 ALLOW_IB_STANDARD = True
 ALLOW_IB_FIB = False
@@ -140,7 +140,7 @@ IB_SETTINGS = {
     "hold_until_tested": True,
     "standard_projection_enabled": True,
     # 0 a 100 jsou základ sady a dopočítají se uvnitř ib_calculator.py
-    "standard_multipliers": [1.5, 2.0, 3.0],
+    "standard_multipliers": [1.5, 2.0],
     "fibonacci_projection_enabled": False,
     "fibonacci_multipliers": [1.272, 1.618, 2.618],
 }
