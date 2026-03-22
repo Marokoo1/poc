@@ -107,18 +107,19 @@ MIN_LEVEL_AGE_BARS = 3
 # ============================================================
 SIGNAL_MODES = ["poc", "ib"]  # available: "poc", "ib"
 
-# Master switches for which IB level families are generated at all
-ALLOW_IB_CORE = True
+# IB je teď jedna sada levelů. Není zvlášť "core" a "standard".
+# Standardní sada znamená: 0, 100, 150, 200, 300, -150, -200, -300
+# Fib zůstává volitelně oddělený přes period_type *_fib.
 ALLOW_IB_STANDARD = True
 ALLOW_IB_FIB = False
 
 # Samostatný filtr pro IB standalone backtest
 IB_SIGNAL_FILTERS = {
     "enabled": False,
-    "allowed_period_types": [],        # např. ["monthly_ib", "yearly_ib_std"] ; [] = vše
-    "allowed_level_families": [],      # např. ["ib_core", "ib_standard"] ; [] = vše
-    "allowed_level_names": [],         # přesné názvy, např. ["M_IBL", "M_IB_150_DN"]
-    "allowed_name_contains": [],       # částečné filtry, např. ["_DN", "M_IB_"]
+    "allowed_period_types": [],        # např. ["monthly_ib", "yearly_ib_fib"] ; [] = vše
+    "allowed_level_families": [],      # corrected IB používá hlavně "ib"; [] = vše
+    "allowed_level_names": [],         # přesné názvy, např. ["M_IB_0", "M_IB_150", "M_IB_NEG150"]
+    "allowed_name_contains": [],       # částečné filtry, např. ["NEG", "M_IB_"]
 }
 
 # Konfigurace pro anotaci POC obchodů aktivní IB podporou
@@ -126,7 +127,7 @@ POC_IB_CONTEXT_SETTINGS = {
     "enabled": True,
     "max_atr": 0.25,
     "allowed_period_types": [],        # [] = vše
-    "allowed_level_families": ["ib_core", "ib_standard"],
+    "allowed_level_families": [],      # corrected IB = jedna rodina
     "allowed_level_names": [],
     "allowed_name_contains": [],
 }
@@ -138,9 +139,10 @@ IB_SETTINGS = {
     "monthly_mode": "first_5_trading_days",
     "hold_until_tested": True,
     "standard_projection_enabled": True,
-    "standard_multipliers": [1.0, 1.5, 2.0, 3.0],
+    # 0 a 100 jsou základ sady a dopočítají se uvnitř ib_calculator.py
+    "standard_multipliers": [1.5, 2.0, 3.0],
     "fibonacci_projection_enabled": False,
-    "fibonacci_multipliers": [0.618, 1.0, 1.272, 1.618, 2.618],
+    "fibonacci_multipliers": [1.272, 1.618, 2.618],
 }
 
 
@@ -398,12 +400,13 @@ def build_ib_levels_for_ticker(ticker: str, price_df: pd.DataFrame) -> pd.DataFr
     if ib_df.empty:
         return pd.DataFrame()
 
-    if not ALLOW_IB_CORE:
-        ib_df = ib_df[ib_df["LevelFamily"] != "ib_core"].copy()
-    if not ALLOW_IB_STANDARD:
-        ib_df = ib_df[ib_df["LevelFamily"] != "ib_standard"].copy()
-    if not ALLOW_IB_FIB:
-        ib_df = ib_df[ib_df["LevelFamily"] != "ib_fib"].copy()
+    # corrected calculator: standardní IB sada je jedna rodina "ib"
+    # fib zůstává oddělený přes period_type obsahující "_fib"
+    if not ALLOW_IB_FIB and "PeriodType" in ib_df.columns:
+        ib_df = ib_df[~ib_df["PeriodType"].astype(str).str.contains("_fib", case=False, na=False)].copy()
+
+    if not ALLOW_IB_STANDARD and "PeriodType" in ib_df.columns:
+        ib_df = ib_df[ib_df["PeriodType"].astype(str).str.contains("_fib", case=False, na=False)].copy()
 
     if ib_df.empty:
         return pd.DataFrame()
@@ -1185,9 +1188,14 @@ def normalize_signal_modes() -> list[str]:
     return modes
 
 
-def infer_ib_level_side(level_name: str) -> str:
-    name = str(level_name).upper()
-    if name.endswith("_DN") or name.endswith("IBL"):
+def infer_ib_level_side(level_name: str, multiplier=None, badge: str | None = None) -> str:
+    if multiplier is not None and not pd.isna(multiplier):
+        try:
+            return "support" if float(multiplier) <= 0 else "resistance"
+        except Exception:
+            pass
+    b = str(badge or "").strip().upper()
+    if b.startswith("-") or b == "0":
         return "support"
     return "resistance"
 
@@ -1249,7 +1257,7 @@ def compute_ib_tested_at_for_ticker(
     levels = ib_levels.copy()
     levels["ActiveFrom"] = pd.to_datetime(levels["ActiveFrom"], errors="coerce")
     levels["LevelPrice"] = pd.to_numeric(levels["LevelPrice"], errors="coerce")
-    levels["LevelSide"] = levels["LevelName"].apply(infer_ib_level_side)
+    levels["LevelSide"] = levels.apply(lambda r: infer_ib_level_side(r.get("LevelName"), r.get("Multiplier"), r.get("LevelBadge")), axis=1)
 
     tested_at_list = []
     touches_list = []
