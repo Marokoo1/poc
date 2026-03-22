@@ -105,11 +105,31 @@ MIN_LEVEL_AGE_BARS = 3
 # ============================================================
 # SIGNAL / CONFLUENCE MODES
 # ============================================================
-SIGNAL_MODES = ["poc", "ib", "poc_ib"]  # available: "poc", "ib", "poc_ib", "ib_poc"
-CONFLUENCE_MAX_ATR = 0.35
+SIGNAL_MODES = ["poc", "ib"]  # available: "poc", "ib"
+
+# Master switches for which IB level families are generated at all
 ALLOW_IB_CORE = True
 ALLOW_IB_STANDARD = True
 ALLOW_IB_FIB = False
+
+# Samostatný filtr pro IB standalone backtest
+IB_SIGNAL_FILTERS = {
+    "enabled": True,
+    "allowed_period_types": [],        # např. ["monthly_ib", "yearly_ib_std"] ; [] = vše
+    "allowed_level_families": [],      # např. ["ib_core", "ib_standard"] ; [] = vše
+    "allowed_level_names": [],         # přesné názvy, např. ["M_IBL", "M_IB_150_DN"]
+    "allowed_name_contains": [],       # částečné filtry, např. ["_DN", "M_IB_"]
+}
+
+# Konfigurace pro anotaci POC obchodů aktivní IB podporou
+POC_IB_CONTEXT_SETTINGS = {
+    "enabled": True,
+    "max_atr": 0.25,
+    "allowed_period_types": [],        # [] = vše
+    "allowed_level_families": ["ib_core", "ib_standard"],
+    "allowed_level_names": [],
+    "allowed_name_contains": [],
+}
 
 IB_SETTINGS = {
     "enabled": True,
@@ -1149,26 +1169,6 @@ def simulate_single_level(level_row: pd.Series, ohlcv: pd.DataFrame) -> TradeRes
     )
 
 
-def build_signal_and_context_levels(all_levels: pd.DataFrame, signal_mode: str) -> tuple[pd.DataFrame, pd.DataFrame, str]:
-    if all_levels.empty:
-        return pd.DataFrame(), pd.DataFrame(), str(signal_mode).lower()
-
-    mode = str(signal_mode).lower()
-    poc_mask = all_levels["LevelSource"].fillna("POC").astype(str).str.upper() == "POC"
-    ib_mask = all_levels["LevelSource"].fillna("").astype(str).str.upper() == "IB"
-
-    if mode == "poc":
-        return all_levels.loc[poc_mask].copy(), pd.DataFrame(), mode
-    if mode == "ib":
-        return all_levels.loc[ib_mask].copy(), pd.DataFrame(), mode
-    if mode == "poc_ib":
-        return all_levels.loc[poc_mask].copy(), all_levels.loc[ib_mask].copy(), mode
-    if mode == "ib_poc":
-        return all_levels.loc[ib_mask].copy(), all_levels.loc[poc_mask].copy(), mode
-
-    raise ValueError(f"Unknown signal mode: {signal_mode}")
-
-
 def normalize_signal_modes() -> list[str]:
     raw_modes = SIGNAL_MODES if isinstance(SIGNAL_MODES, (list, tuple, set)) else [SIGNAL_MODES]
     modes: list[str] = []
@@ -1176,7 +1176,7 @@ def normalize_signal_modes() -> list[str]:
         mode_str = str(mode).strip().lower()
         if not mode_str:
             continue
-        if mode_str not in {"poc", "ib", "poc_ib", "ib_poc"}:
+        if mode_str not in {"poc", "ib"}:
             raise ValueError(f"Unknown signal mode in SIGNAL_MODES: {mode}")
         if mode_str not in modes:
             modes.append(mode_str)
@@ -1185,58 +1185,217 @@ def normalize_signal_modes() -> list[str]:
     return modes
 
 
-def annotate_signal_levels_with_confluence(signal_levels: pd.DataFrame, context_levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
-    if signal_levels.empty:
-        return signal_levels.copy()
+def infer_ib_level_side(level_name: str) -> str:
+    name = str(level_name).upper()
+    if name.endswith("_DN") or name.endswith("IBL"):
+        return "support"
+    return "resistance"
 
-    out = signal_levels.copy()
-    out["has_confluence"] = False
-    out["confluence_count"] = 0
-    out["nearest_confluence_distance_abs"] = np.nan
-    out["nearest_confluence_distance_atr"] = np.nan
-    out["nearest_confluence_level"] = np.nan
-    out["confluence_sources"] = ""
 
-    if context_levels.empty:
+def _normalize_filter_values(values) -> set[str]:
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        values = [values]
+    out = {str(v).strip().lower() for v in values if str(v).strip()}
+    return out
+
+
+def filter_ib_levels_for_use(
+    ib_levels: pd.DataFrame,
+    *,
+    allowed_period_types=None,
+    allowed_level_families=None,
+    allowed_level_names=None,
+    allowed_name_contains=None,
+) -> pd.DataFrame:
+    if ib_levels.empty:
+        return ib_levels.copy()
+
+    out = ib_levels.copy()
+    period_types = _normalize_filter_values(allowed_period_types)
+    families = _normalize_filter_values(allowed_level_families)
+    names = _normalize_filter_values(allowed_level_names)
+    name_contains = _normalize_filter_values(allowed_name_contains)
+
+    if period_types:
+        out = out[out["PeriodType"].astype(str).str.lower().isin(period_types)].copy()
+    if families:
+        out = out[out["LevelFamily"].astype(str).str.lower().isin(families)].copy()
+    if names:
+        out = out[out["LevelName"].astype(str).str.lower().isin(names)].copy()
+    if name_contains:
+        mask = out["LevelName"].astype(str).str.lower().apply(lambda x: any(s in x for s in name_contains))
+        out = out[mask].copy()
+
+    return out.reset_index(drop=True)
+
+
+def compute_ib_tested_at_for_ticker(
+    price_df: pd.DataFrame,
+    ib_levels: pd.DataFrame,
+) -> pd.DataFrame:
+    if ib_levels.empty:
+        out = ib_levels.copy()
+        out["TestedAt"] = pd.NaT
+        out["TouchesCount"] = 0
+        out["IsTested"] = False
         return out
 
-    context = context_levels.copy()
-    context["ActiveFrom"] = pd.to_datetime(context["ActiveFrom"], errors="coerce")
-    if "ValidUntil" in context.columns:
-        context["ValidUntil"] = pd.to_datetime(context["ValidUntil"], errors="coerce")
-    else:
-        context["ValidUntil"] = pd.NaT
+    prices = price_df.copy()
+    prices["Date"] = pd.to_datetime(prices["Date"], errors="coerce")
+    prices = prices.sort_values("Date").reset_index(drop=True)
 
-    for idx, row in out.iterrows():
-        active_from = pd.to_datetime(row.get("ActiveFrom"), errors="coerce")
-        level_price = pd.to_numeric(row.get("LevelPrice", row.get("POC")), errors="coerce")
-        atr = get_level_atr_at_active_from(row, ohlcv)
-        if pd.isna(active_from) or pd.isna(level_price) or atr is None or atr <= 0:
+    levels = ib_levels.copy()
+    levels["ActiveFrom"] = pd.to_datetime(levels["ActiveFrom"], errors="coerce")
+    levels["LevelPrice"] = pd.to_numeric(levels["LevelPrice"], errors="coerce")
+    levels["LevelSide"] = levels["LevelName"].apply(infer_ib_level_side)
+
+    tested_at_list = []
+    touches_list = []
+
+    for _, lvl in levels.iterrows():
+        active_from = lvl.get("ActiveFrom")
+        level_price = lvl.get("LevelPrice")
+        side = lvl.get("LevelSide")
+
+        if pd.isna(active_from) or pd.isna(level_price):
+            tested_at_list.append(pd.NaT)
+            touches_list.append(0)
             continue
 
-        eligible = context.loc[(context["ActiveFrom"] <= active_from) & ((context["ValidUntil"].isna()) | (context["ValidUntil"] > active_from))].copy()
-        if eligible.empty:
+        future_prices = prices[prices["Date"] >= active_from]
+        if future_prices.empty:
+            tested_at_list.append(pd.NaT)
+            touches_list.append(0)
             continue
 
-        eligible["distance_abs"] = (pd.to_numeric(eligible["LevelPrice"], errors="coerce") - float(level_price)).abs()
-        eligible = eligible.dropna(subset=["distance_abs"]).copy()
-        if eligible.empty:
+        if side == "resistance":
+            hits = future_prices[future_prices["High"] >= level_price]
+        else:
+            hits = future_prices[future_prices["Low"] <= level_price]
+
+        if hits.empty:
+            tested_at_list.append(pd.NaT)
+            touches_list.append(0)
+        else:
+            tested_at_list.append(pd.Timestamp(hits.iloc[0]["Date"]))
+            touches_list.append(int(len(hits)))
+
+    levels["TestedAt"] = tested_at_list
+    levels["TouchesCount"] = touches_list
+    levels["IsTested"] = levels["TestedAt"].notna()
+    levels["ValidUntil"] = levels["TestedAt"]
+    return levels
+
+
+def enrich_poc_trades_with_ib_context(
+    poc_trades: pd.DataFrame,
+    ib_levels: pd.DataFrame,
+    ohlcv: pd.DataFrame,
+    context_settings: dict | None = None,
+) -> pd.DataFrame:
+    settings = context_settings or {}
+    context_enabled = bool(settings.get("enabled", True))
+    confluence_max_atr = float(settings.get("max_atr", 0.25))
+
+    out = poc_trades.copy()
+    defaults = {
+        "has_confluence": False,
+        "has_ib_support": False,
+        "confluence_count": 0,
+        "ib_support_count": 0,
+        "nearest_confluence_distance_abs": np.nan,
+        "nearest_confluence_distance_atr": np.nan,
+        "nearest_confluence_level": np.nan,
+        "nearest_ib_distance_abs": np.nan,
+        "nearest_ib_distance_atr": np.nan,
+        "nearest_ib_level_name": "",
+        "nearest_ib_level_family": "",
+        "nearest_ib_period_type": "",
+        "has_yearly_ib_support": False,
+        "has_monthly_ib_support": False,
+        "confluence_sources": "",
+        "confluence_mode": "POC without IB support",
+    }
+    for k, v in defaults.items():
+        out[k] = v
+
+    if out.empty or ib_levels.empty or not context_enabled:
+        return out
+
+    ib = filter_ib_levels_for_use(
+        ib_levels,
+        allowed_period_types=settings.get("allowed_period_types", []),
+        allowed_level_families=settings.get("allowed_level_families", []),
+        allowed_level_names=settings.get("allowed_level_names", []),
+        allowed_name_contains=settings.get("allowed_name_contains", []),
+    )
+    if ib.empty:
+        return out
+
+    trades = out.copy()
+    trades["entry_date"] = pd.to_datetime(trades["entry_date"], errors="coerce")
+    trades["level_price"] = pd.to_numeric(trades["level_price"], errors="coerce")
+
+    atr_map = ohlcv.copy()
+    atr_map["Date"] = pd.to_datetime(atr_map["Date"], errors="coerce")
+    atr_map["ATR"] = pd.to_numeric(atr_map["ATR"], errors="coerce")
+    atr_by_date = atr_map.set_index("Date")["ATR"].to_dict()
+
+    ib["ActiveFrom"] = pd.to_datetime(ib["ActiveFrom"], errors="coerce")
+    ib["TestedAt"] = pd.to_datetime(ib.get("TestedAt"), errors="coerce")
+    ib["LevelPrice"] = pd.to_numeric(ib["LevelPrice"], errors="coerce")
+
+    for idx, tr in trades.iterrows():
+        entry_time = tr.get("entry_date")
+        signal_price = tr.get("level_price")
+        atr = atr_by_date.get(entry_time, np.nan)
+
+        if pd.isna(entry_time) or pd.isna(signal_price) or pd.isna(atr) or float(atr) <= 0:
             continue
 
-        eligible["distance_atr"] = eligible["distance_abs"] / float(atr)
-        near = eligible.loc[eligible["distance_atr"] <= float(CONFLUENCE_MAX_ATR)].copy()
-        if near.empty:
+        active_ib = ib[
+            (ib["ActiveFrom"] <= entry_time)
+            & (ib["TestedAt"].isna() | (entry_time < ib["TestedAt"]))
+        ].copy()
+
+        if active_ib.empty:
             continue
 
-        nearest = near.sort_values(["distance_atr", "distance_abs"]).iloc[0]
-        out.at[idx, "has_confluence"] = True
-        out.at[idx, "confluence_count"] = int(len(near))
-        out.at[idx, "nearest_confluence_distance_abs"] = float(nearest["distance_abs"])
-        out.at[idx, "nearest_confluence_distance_atr"] = float(nearest["distance_atr"])
-        out.at[idx, "nearest_confluence_level"] = float(nearest["LevelPrice"])
-        out.at[idx, "confluence_sources"] = ", ".join(sorted(near["LevelName"].astype(str).unique().tolist()))
+        active_ib["distance_abs"] = (active_ib["LevelPrice"] - float(signal_price)).abs()
+        active_ib["distance_atr"] = active_ib["distance_abs"] / float(atr)
+        supported = active_ib[active_ib["distance_atr"] <= confluence_max_atr].copy()
 
-    return out
+        if supported.empty:
+            continue
+
+        nearest = supported.sort_values(["distance_atr", "distance_abs"]).iloc[0]
+        trades.at[idx, "has_confluence"] = True
+        trades.at[idx, "has_ib_support"] = True
+        trades.at[idx, "confluence_count"] = int(len(supported))
+        trades.at[idx, "ib_support_count"] = int(len(supported))
+        trades.at[idx, "nearest_confluence_distance_abs"] = float(nearest["distance_abs"])
+        trades.at[idx, "nearest_confluence_distance_atr"] = float(nearest["distance_atr"])
+        trades.at[idx, "nearest_confluence_level"] = float(nearest["LevelPrice"])
+        trades.at[idx, "nearest_ib_distance_abs"] = float(nearest["distance_abs"])
+        trades.at[idx, "nearest_ib_distance_atr"] = float(nearest["distance_atr"])
+        trades.at[idx, "nearest_ib_level_name"] = str(nearest.get("LevelName", ""))
+        trades.at[idx, "nearest_ib_level_family"] = str(nearest.get("LevelFamily", ""))
+        trades.at[idx, "nearest_ib_period_type"] = str(nearest.get("PeriodType", ""))
+        trades.at[idx, "has_yearly_ib_support"] = bool((supported["PeriodType"].astype(str).str.contains("yearly", case=False, na=False)).any())
+        trades.at[idx, "has_monthly_ib_support"] = bool((supported["PeriodType"].astype(str).str.contains("monthly", case=False, na=False)).any())
+        trades.at[idx, "confluence_sources"] = ", ".join(sorted(supported["LevelName"].astype(str).unique().tolist()))
+        trades.at[idx, "confluence_mode"] = "POC supported by IB"
+
+    trades["has_confluence"] = trades["has_confluence"].eq(True)
+    trades["has_ib_support"] = trades["has_ib_support"].eq(True)
+    trades["has_yearly_ib_support"] = trades["has_yearly_ib_support"].eq(True)
+    trades["has_monthly_ib_support"] = trades["has_monthly_ib_support"].eq(True)
+    trades["confluence_count"] = pd.to_numeric(trades["confluence_count"], errors="coerce").fillna(0).astype(int)
+    trades["ib_support_count"] = pd.to_numeric(trades["ib_support_count"], errors="coerce").fillna(0).astype(int)
+    return trades
+
 
 
 def run_backtest_for_ticker_mode(
@@ -1245,14 +1404,33 @@ def run_backtest_for_ticker_mode(
     base_levels: pd.DataFrame,
     signal_mode: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    signal_levels, context_levels, signal_mode = build_signal_and_context_levels(base_levels, signal_mode)
-    signal_levels = annotate_signal_levels_with_confluence(signal_levels, context_levels, ohlcv)
+    mode = str(signal_mode).lower()
+    poc_mask = base_levels["LevelSource"].fillna("POC").astype(str).str.upper() == "POC"
+    ib_mask = base_levels["LevelSource"].fillna("").astype(str).str.upper() == "IB"
 
-    if signal_mode in {"poc_ib", "ib_poc"}:
-        signal_levels = signal_levels.loc[signal_levels["has_confluence"] == True].copy()
+    if mode == "poc":
+        signal_levels = base_levels.loc[poc_mask].copy()
+        context_ib = filter_ib_levels_for_use(
+            base_levels.loc[ib_mask].copy(),
+            allowed_period_types=POC_IB_CONTEXT_SETTINGS.get("allowed_period_types", []),
+            allowed_level_families=POC_IB_CONTEXT_SETTINGS.get("allowed_level_families", []),
+            allowed_level_names=POC_IB_CONTEXT_SETTINGS.get("allowed_level_names", []),
+            allowed_name_contains=POC_IB_CONTEXT_SETTINGS.get("allowed_name_contains", []),
+        )
+    elif mode == "ib":
+        signal_levels = filter_ib_levels_for_use(
+            base_levels.loc[ib_mask].copy(),
+            allowed_period_types=IB_SIGNAL_FILTERS.get("allowed_period_types", []),
+            allowed_level_families=IB_SIGNAL_FILTERS.get("allowed_level_families", []),
+            allowed_level_names=IB_SIGNAL_FILTERS.get("allowed_level_names", []),
+            allowed_name_contains=IB_SIGNAL_FILTERS.get("allowed_name_contains", []),
+        )
+        context_ib = pd.DataFrame()
+    else:
+        raise ValueError(f"Unknown signal mode: {signal_mode}")
 
     levels_out = base_levels.copy()
-    levels_out["signal_mode"] = signal_mode
+    levels_out["signal_mode"] = mode
     levels_out["UsedAsSignal"] = False
     levels_out["has_confluence"] = False
     levels_out["confluence_count"] = 0
@@ -1260,6 +1438,11 @@ def run_backtest_for_ticker_mode(
     levels_out["nearest_confluence_distance_atr"] = np.nan
     levels_out["nearest_confluence_level"] = np.nan
     levels_out["confluence_sources"] = ""
+    levels_out["confluence_mode"] = np.where(
+        levels_out["LevelSource"].fillna("POC").astype(str).str.upper() == "IB",
+        "IB standalone",
+        "POC without IB support",
+    )
 
     if not signal_levels.empty:
         merge_cols = ["Ticker", "PeriodType", "Period", "LevelName", "ActiveFrom"]
@@ -1268,60 +1451,58 @@ def run_backtest_for_ticker_mode(
         right = signal_levels.copy()
         right["_merge_price"] = pd.to_numeric(right.get("LevelPrice", right.get("POC")), errors="coerce").round(8)
         levels_out = left.merge(
-            right[
-                merge_cols
-                + [
-                    "_merge_price",
-                    "has_confluence",
-                    "confluence_count",
-                    "nearest_confluence_distance_abs",
-                    "nearest_confluence_distance_atr",
-                    "nearest_confluence_level",
-                    "confluence_sources",
-                ]
-            ],
+            right[merge_cols + ["_merge_price"]],
             how="left",
             on=merge_cols + ["_merge_price"],
             suffixes=("", "_sig"),
+            indicator=True,
         )
-        levels_out["UsedAsSignal"] = levels_out["has_confluence"].notna() | levels_out["confluence_count"].notna()
-        for col in [
-            "has_confluence",
-            "confluence_count",
-            "nearest_confluence_distance_abs",
-            "nearest_confluence_distance_atr",
-            "nearest_confluence_level",
-            "confluence_sources",
-        ]:
-            sig_col = f"{col}_sig"
-            if sig_col in levels_out.columns:
-                levels_out[col] = levels_out[sig_col].where(levels_out[sig_col].notna(), levels_out[col])
-                levels_out = levels_out.drop(columns=[sig_col])
-        levels_out = levels_out.drop(columns=["_merge_price"])
-        levels_out["has_confluence"] = levels_out["has_confluence"].eq(True)
+        levels_out["UsedAsSignal"] = levels_out["_merge"] == "both"
+        levels_out = levels_out.drop(columns=["_merge", "_merge_price"])
         levels_out["UsedAsSignal"] = levels_out["UsedAsSignal"].eq(True)
-        levels_out["confluence_count"] = pd.to_numeric(levels_out["confluence_count"], errors="coerce").fillna(0).astype(int)
 
     trade_rows = []
     for _, level_row in signal_levels.iterrows():
         result = simulate_single_level(level_row, ohlcv)
         row = asdict(result)
-        row["signal_mode"] = signal_mode
+        row["signal_mode"] = mode
         row["level_source"] = str(level_row.get("LevelSource", "POC"))
         row["level_family"] = str(level_row.get("LevelFamily", "poc"))
         row["level_name"] = str(level_row.get("LevelName", "POC"))
-        row["has_confluence"] = bool(level_row.get("has_confluence", False))
-        row["confluence_count"] = int(level_row.get("confluence_count", 0) or 0)
-        row["nearest_confluence_distance_abs"] = level_row.get("nearest_confluence_distance_abs")
-        row["nearest_confluence_distance_atr"] = level_row.get("nearest_confluence_distance_atr")
-        row["nearest_confluence_level"] = level_row.get("nearest_confluence_level")
-        row["confluence_sources"] = str(level_row.get("confluence_sources", ""))
-        row["confluence_mode"] = "with_confluence" if bool(level_row.get("has_confluence", False)) else "without_confluence"
+        row["has_confluence"] = False
+        row["confluence_count"] = 0
+        row["nearest_confluence_distance_abs"] = np.nan
+        row["nearest_confluence_distance_atr"] = np.nan
+        row["nearest_confluence_level"] = np.nan
+        row["confluence_sources"] = ""
+        row["confluence_mode"] = "IB standalone" if mode == "ib" else "POC without IB support"
         trade_rows.append(row)
 
     trades = pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame()
     if trades.empty:
         return levels_out, trades, pd.DataFrame()
+
+    if mode == "poc":
+        trades = enrich_poc_trades_with_ib_context(
+            trades,
+            ib_levels=context_ib,
+            ohlcv=ohlcv,
+            context_settings=POC_IB_CONTEXT_SETTINGS,
+        )
+        levels_out.loc[
+            levels_out["UsedAsSignal"] & (levels_out["LevelSource"].fillna("POC").astype(str).str.upper() == "POC"),
+            "confluence_mode",
+        ] = "POC signal"
+    else:
+        trades["has_ib_support"] = False
+        trades["ib_support_count"] = 0
+        trades["nearest_ib_distance_abs"] = np.nan
+        trades["nearest_ib_distance_atr"] = np.nan
+        trades["nearest_ib_level_name"] = ""
+        trades["nearest_ib_level_family"] = ""
+        trades["nearest_ib_period_type"] = ""
+        trades["has_yearly_ib_support"] = False
+        trades["has_monthly_ib_support"] = False
 
     summary = (
         trades.groupby(["ticker", "signal_mode", "level_source", "period_type", "side", "exit_reason"], dropna=False)
@@ -1344,6 +1525,13 @@ def run_backtest_for_ticker(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame, pd
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     base_levels = apply_level_supersession(base_levels, ohlcv)
+
+    ib_mask = base_levels["LevelSource"].fillna("").astype(str).str.upper() == "IB"
+    if ib_mask.any():
+        ib_levels = compute_ib_tested_at_for_ticker(ohlcv, base_levels.loc[ib_mask].copy())
+        non_ib = base_levels.loc[~ib_mask].copy()
+        base_levels = pd.concat([non_ib, ib_levels], ignore_index=True, sort=False)
+        base_levels = base_levels.sort_values(["ActiveFrom", "PeriodType", "Period", "LevelPrice"]).reset_index(drop=True)
 
     mode_levels: list[pd.DataFrame] = []
     mode_trades: list[pd.DataFrame] = []
@@ -1433,6 +1621,8 @@ def main() -> None:
     print(f"🎯 Počet tickerů: {len(tickers)}")
     print(f"🧪 Preset: {BACKTEST_PRESET}")
     print(f"📆 Periody: {', '.join(INCLUDE_PERIODS)}")
+    print(f"🎛️ Signal modes: {', '.join(normalize_signal_modes())}")
+    print(f"🧭 POC+IB context enabled: {POC_IB_CONTEXT_SETTINGS.get('enabled', True)} | max ATR: {POC_IB_CONTEXT_SETTINGS.get('max_atr', 0.25)}")
     print()
 
     for i, ticker in enumerate(tickers, start=1):
