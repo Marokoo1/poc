@@ -9,14 +9,27 @@ import plotly.graph_objects as go
 import streamlit as st
 import yaml
 
+from ib_calculator import calculate_all_ib_levels
 
-PERIOD_STYLES = {
-    "weekly": {"label": "Weekly", "color": "#6EC1FF", "width": 1.4, "dash": "dot", "rank": 3},
-    "monthly": {"label": "Monthly", "color": "#FFB84D", "width": 2.2, "dash": "dash", "rank": 2},
-    "yearly": {"label": "Yearly", "color": "#FF6B6B", "width": 3.2, "dash": "solid", "rank": 1},
-}
 
 STANDARD_OHLCV = ["Date", "Open", "High", "Low", "Close", "Volume"]
+
+DISPLAY_MODE_OPTIONS = ["POC", "IB", "POC + IB"]
+POC_PERIODS = ["weekly", "monthly", "yearly"]
+IB_PERIODS = ["monthly_ib", "yearly_ib", "monthly_ib_std", "yearly_ib_std", "monthly_ib_fib", "yearly_ib_fib"]
+IB_FAMILIES = ["ib_core", "ib_standard", "ib_fib"]
+
+STYLE_MAP = {
+    "weekly": {"label": "Weekly POC", "color": "#6EC1FF", "width": 1.4, "dash": "dot", "rank": 6},
+    "monthly": {"label": "Monthly POC", "color": "#FFB84D", "width": 2.2, "dash": "dash", "rank": 5},
+    "yearly": {"label": "Yearly POC", "color": "#FF6B6B", "width": 3.0, "dash": "solid", "rank": 4},
+    "monthly_ib": {"label": "Monthly IB Core", "color": "#34D399", "width": 2.4, "dash": "solid", "rank": 3},
+    "yearly_ib": {"label": "Yearly IB Core", "color": "#10B981", "width": 3.2, "dash": "solid", "rank": 2},
+    "monthly_ib_std": {"label": "Monthly IB Std", "color": "#A78BFA", "width": 1.8, "dash": "dash", "rank": 7},
+    "yearly_ib_std": {"label": "Yearly IB Std", "color": "#8B5CF6", "width": 2.2, "dash": "dash", "rank": 1},
+    "monthly_ib_fib": {"label": "Monthly IB Fib", "color": "#F472B6", "width": 1.6, "dash": "dot", "rank": 9},
+    "yearly_ib_fib": {"label": "Yearly IB Fib", "color": "#EC4899", "width": 2.0, "dash": "dot", "rank": 8},
+}
 
 
 @dataclass
@@ -29,14 +42,31 @@ class DataSource:
 
 
 @dataclass
+class IBSettings:
+    enabled: bool
+    yearly_enabled: bool
+    monthly_enabled: bool
+    monthly_mode: str
+    standard_projection_enabled: bool
+    standard_multipliers: list[float]
+    fibonacci_projection_enabled: bool
+    fibonacci_multipliers: list[float]
+
+
+@dataclass
 class ChartSettings:
-    selected_periods: list[str]
-    show_only_untouched: bool
+    display_mode: str
+    selected_poc_periods: list[str]
+    selected_ib_periods: list[str]
+    selected_ib_families: list[str]
+    level_status: str
     show_labels: bool
     nearest_only: bool
     nearest_count: int
     months_back: int
-    extend_from_period_start: bool
+    extend_from_activation: bool
+    show_confluence_only: bool
+    confluence_max_atr: float
 
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -48,13 +78,61 @@ def load_yaml_settings(settings_path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+@st.cache_data(show_spinner=False, ttl=60)
+def load_ohlcv_from_csv(raw_file_path: str) -> pd.DataFrame:
+    path = Path(raw_file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Raw data soubor nebyl nalezen: {path}")
+    df = pd.read_csv(path)
+    return normalize_ohlcv(df)
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_poc_data(poc_file_path: str, ticker_hint: str | None = None) -> pd.DataFrame:
+    path = Path(poc_file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"POC soubor nebyl nalezen: {path}")
+
+    df = pd.read_csv(path)
+    for col in ["PeriodStart", "PeriodEnd"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    if "Ticker" not in df.columns:
+        inferred_ticker = str(ticker_hint or path.stem.replace("_poc", "")).upper().strip()
+        df["Ticker"] = inferred_ticker
+
+    required = {
+        "Ticker", "PeriodType", "Period", "PeriodStart", "PeriodEnd",
+        "POC", "POC_Volume", "Period_High", "Period_Low", "Period_Close"
+    }
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"POC CSV nemá očekávané sloupce: {sorted(missing)}")
+
+    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+    df["PeriodType"] = df["PeriodType"].astype(str).str.lower().str.strip()
+    numeric_cols = ["POC", "POC_Volume", "Period_High", "Period_Low", "Period_Close"]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["Ticker", "PeriodType", "POC", "PeriodStart", "PeriodEnd"]).copy()
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def compute_ib_levels_from_ohlcv(raw_file_path: str, ticker: str, ib_settings_dict: dict) -> pd.DataFrame:
+    ohlcv = load_ohlcv_from_csv(raw_file_path)
+    ib_df = calculate_all_ib_levels(ohlcv.copy(), ticker=ticker, settings=ib_settings_dict)
+    if ib_df.empty:
+        return ib_df
+    return ib_df
+
+
 def discover_project_root(settings_path: Path) -> Path:
     return settings_path.parent.parent if settings_path.parent.name == "config" else settings_path.parent
 
 
 def build_sources(settings: dict, project_root: Path) -> tuple[dict[str, DataSource], str]:
     sources: dict[str, DataSource] = {}
-
     paths_cfg = settings.get("paths", {})
     raw_dir = paths_cfg.get("raw_data_dir", "data/raw")
     processed_dir = paths_cfg.get("processed_data_dir", "data/processed")
@@ -75,7 +153,6 @@ def build_sources(settings: dict, project_root: Path) -> tuple[dict[str, DataSou
     for source_name, source_cfg in sources_cfg.items():
         raw_source_dir = Path(str(source_cfg.get("raw_data_dir", raw_dir)))
         processed_source_dir = Path(str(source_cfg.get("processed_data_dir", processed_dir)))
-
         if not raw_source_dir.is_absolute():
             raw_source_dir = (project_root / raw_source_dir).resolve()
         if not processed_source_dir.is_absolute():
@@ -91,7 +168,6 @@ def build_sources(settings: dict, project_root: Path) -> tuple[dict[str, DataSou
 
     if default_source not in sources:
         default_source = "project_default"
-
     return sources, default_source
 
 
@@ -100,7 +176,6 @@ def list_tickers(processed_dir: str, poc_file_pattern: str) -> list[str]:
     base = Path(processed_dir)
     if not base.exists():
         return []
-
     suffix = poc_file_pattern.replace("{ticker}", "")
     prefix = poc_file_pattern.split("{ticker}")[0] if "{ticker}" in poc_file_pattern else ""
 
@@ -121,9 +196,7 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
     for col in df.columns:
         key = str(col).strip().lower()
-        if key == "datetime":
-            rename_map[col] = "Date"
-        elif key == "date":
+        if key in {"datetime", "date"}:
             rename_map[col] = "Date"
         elif key in {"open", "high", "low", "close", "volume"}:
             rename_map[col] = key.capitalize()
@@ -139,108 +212,173 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-@st.cache_data(show_spinner=False, ttl=60)
-def load_ohlcv_from_csv(raw_file_path: str) -> pd.DataFrame:
-    path = Path(raw_file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Raw data soubor nebyl nalezen: {path}")
-    df = pd.read_csv(path)
-    return normalize_ohlcv(df)
+def infer_ib_side(level_name: str) -> str:
+    name = str(level_name).upper()
+    if name.endswith("_DN") or name.endswith("IBL"):
+        return "support"
+    return "resistance"
 
 
-@st.cache_data(show_spinner=False, ttl=60)
-def load_poc_data(poc_file_path: str, ticker_hint: str | None = None) -> pd.DataFrame:
-    path = Path(poc_file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"POC soubor nebyl nalezen: {path}")
-
-    df = pd.read_csv(path)
-
-    for col in ["PeriodStart", "PeriodEnd"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    if "Ticker" not in df.columns:
-        inferred_ticker = None
-        if ticker_hint:
-            inferred_ticker = str(ticker_hint).upper().strip()
-        else:
-            name = path.stem
-            if name.lower().endswith("_poc"):
-                inferred_ticker = name[:-4].upper().strip()
-            else:
-                inferred_ticker = name.upper().strip()
-        df["Ticker"] = inferred_ticker
-
-    required = {
-        "Ticker", "PeriodType", "Period", "PeriodStart", "PeriodEnd",
-        "POC", "POC_Volume", "Period_High", "Period_Low", "Period_Close"
-    }
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"POC CSV nemá očekávané sloupce: {sorted(missing)}")
-
-    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
-    df["PeriodType"] = df["PeriodType"].astype(str).str.lower().str.strip()
-    df["POC"] = pd.to_numeric(df["POC"], errors="coerce")
-    df["POC_Volume"] = pd.to_numeric(df["POC_Volume"], errors="coerce")
-    df["Period_High"] = pd.to_numeric(df["Period_High"], errors="coerce")
-    df["Period_Low"] = pd.to_numeric(df["Period_Low"], errors="coerce")
-    df["Period_Close"] = pd.to_numeric(df["Period_Close"], errors="coerce")
-
-    return df.dropna(subset=["Ticker", "PeriodType", "POC", "PeriodStart", "PeriodEnd"]).copy()
-
-
-@st.cache_data(show_spinner=False, ttl=60)
-def enrich_levels(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
+def prepare_poc_levels(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
     if levels.empty:
-        return levels.copy()
-
+        return pd.DataFrame()
     out = levels.copy()
     ohlcv_idx = ohlcv.copy().set_index("Date")
     last_close = float(ohlcv_idx["Close"].iloc[-1])
-    out["LastPrice"] = last_close
-    out["SignedDist"] = (last_close - out["POC"]).round(4)
-    out["AbsDist"] = out["SignedDist"].abs().round(4)
-
+    out["Source"] = "POC"
+    out["LevelFamily"] = "poc"
+    out["LevelName"] = out["PeriodType"].astype(str).str.upper() + "_POC"
+    out["LevelPrice"] = out["POC"]
+    out["AnchorStart"] = out["PeriodEnd"]
+    out["AnchorEnd"] = pd.NaT
+    out["TouchDate"] = pd.NaT
     touched_values: list[bool] = []
     touch_dates: list[pd.Timestamp | pd.NaT] = []
-
     for _, row in out.iterrows():
         after_end = ohlcv_idx[ohlcv_idx.index > pd.Timestamp(row["PeriodEnd"])]
         touched_mask = (after_end["Low"] <= row["POC"]) & (after_end["High"] >= row["POC"])
         if touched_mask.any():
-            first_touch = after_end.index[touched_mask][0]
+            first_touch = pd.Timestamp(after_end.index[touched_mask][0])
             touched_values.append(True)
             touch_dates.append(first_touch)
         else:
             touched_values.append(False)
             touch_dates.append(pd.NaT)
-
     out["Touched"] = touched_values
     out["Valid"] = ~out["Touched"]
     out["TouchDate"] = touch_dates
-    out["AgeDays"] = (pd.Timestamp.today().normalize() - out["PeriodEnd"]).dt.days
-    out["PeriodRank"] = out["PeriodType"].map(lambda x: PERIOD_STYLES.get(x, {}).get("rank", 99))
-    return out.sort_values(["AbsDist", "PeriodRank", "PeriodStart"], ascending=[True, True, False]).reset_index(drop=True)
+    out["Status"] = out["Valid"].map(lambda x: "active" if bool(x) else "tested")
+    out["DisplayUntil"] = out["TouchDate"].where(out["TouchDate"].notna(), pd.NaT)
+    out["LastPrice"] = last_close
+    out["SignedDist"] = (last_close - out["LevelPrice"]).round(4)
+    out["AbsDist"] = out["SignedDist"].abs().round(4)
+    out["PeriodRank"] = out["PeriodType"].map(lambda x: STYLE_MAP.get(x, {}).get("rank", 99))
+    return out
 
 
-def filter_levels(levels: pd.DataFrame, settings: ChartSettings) -> pd.DataFrame:
+def prepare_ib_levels(levels: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    if levels.empty:
+        return pd.DataFrame()
+    prices = ohlcv.copy().sort_values("Date").reset_index(drop=True)
+    last_close = float(prices["Close"].iloc[-1])
+    out = levels.copy()
+    out["Source"] = "IB"
+    out["AnchorStart"] = pd.to_datetime(out.get("ActiveFrom"), errors="coerce")
+    out["LevelPrice"] = pd.to_numeric(out["LevelPrice"], errors="coerce")
+    out["LevelSide"] = out["LevelName"].apply(infer_ib_side)
+
+    tested_at: list[pd.Timestamp | pd.NaT] = []
+    touches: list[int] = []
+    for _, row in out.iterrows():
+        active_from = row.get("AnchorStart")
+        level_price = row.get("LevelPrice")
+        side = row.get("LevelSide")
+        if pd.isna(active_from) or pd.isna(level_price):
+            tested_at.append(pd.NaT)
+            touches.append(0)
+            continue
+        future = prices[prices["Date"] >= active_from]
+        if future.empty:
+            tested_at.append(pd.NaT)
+            touches.append(0)
+            continue
+        if side == "resistance":
+            hits = future[future["High"] >= level_price]
+        else:
+            hits = future[future["Low"] <= level_price]
+        if hits.empty:
+            tested_at.append(pd.NaT)
+            touches.append(0)
+        else:
+            tested_at.append(pd.Timestamp(hits.iloc[0]["Date"]))
+            touches.append(int(len(hits)))
+
+    out["TouchDate"] = tested_at
+    out["Touched"] = out["TouchDate"].notna()
+    out["Valid"] = ~out["Touched"]
+    out["Status"] = out["Valid"].map(lambda x: "active" if bool(x) else "tested")
+    out["TouchesCount"] = touches
+    out["DisplayUntil"] = out["TouchDate"].where(out["TouchDate"].notna(), pd.NaT)
+    out["LastPrice"] = last_close
+    out["SignedDist"] = (last_close - out["LevelPrice"]).round(4)
+    out["AbsDist"] = out["SignedDist"].abs().round(4)
+    out["PeriodRank"] = out["PeriodType"].map(lambda x: STYLE_MAP.get(x, {}).get("rank", 99))
+    return out
+
+
+def filter_unified_levels(levels: pd.DataFrame, settings: ChartSettings) -> pd.DataFrame:
     if levels.empty:
         return levels.copy()
+    data = levels.copy()
 
-    data = levels[levels["PeriodType"].isin(settings.selected_periods)].copy()
-    if settings.show_only_untouched:
+    allowed_sources: list[str]
+    if settings.display_mode == "POC":
+        allowed_sources = ["POC"]
+    elif settings.display_mode == "IB":
+        allowed_sources = ["IB"]
+    else:
+        allowed_sources = ["POC", "IB"]
+    data = data[data["Source"].isin(allowed_sources)]
+
+    if "POC" in allowed_sources:
+        poc_mask = data["Source"].eq("POC")
+        data = pd.concat([
+            data[poc_mask & data["PeriodType"].isin(settings.selected_poc_periods)],
+            data[~poc_mask],
+        ], ignore_index=True)
+
+    if "IB" in allowed_sources:
+        ib_mask = data["Source"].eq("IB")
+        ib_data = data[ib_mask].copy()
+        if settings.selected_ib_periods:
+            ib_data = ib_data[ib_data["PeriodType"].isin(settings.selected_ib_periods)]
+        if settings.selected_ib_families:
+            ib_data = ib_data[ib_data["LevelFamily"].isin(settings.selected_ib_families)]
+        data = pd.concat([data[~ib_mask], ib_data], ignore_index=True)
+
+    if settings.level_status == "Only active":
         data = data[data["Valid"]]
-    if settings.nearest_only:
+    elif settings.level_status == "Only tested":
+        data = data[~data["Valid"]]
+
+    if settings.display_mode == "POC + IB" and settings.show_confluence_only:
+        data = apply_confluence_filter(data, settings.confluence_max_atr)
+
+    if settings.nearest_only and not data.empty:
         data = data.nsmallest(settings.nearest_count, ["AbsDist", "PeriodRank"])
-    return data.sort_values(["PeriodRank", "AbsDist", "PeriodStart"], ascending=[True, True, False]).reset_index(drop=True)
+
+    return data.sort_values(["Source", "PeriodRank", "AbsDist", "AnchorStart"], ascending=[True, True, True, False]).reset_index(drop=True)
+
+
+def apply_confluence_filter(levels: pd.DataFrame, max_atr: float) -> pd.DataFrame:
+    if levels.empty:
+        return levels.copy()
+    poc = levels[levels["Source"] == "POC"].copy()
+    ib = levels[levels["Source"] == "IB"].copy()
+    if poc.empty or ib.empty:
+        return pd.DataFrame(columns=levels.columns)
+
+    all_prices = pd.concat([poc["LevelPrice"], ib["LevelPrice"]], ignore_index=True)
+    price_scale = float(all_prices.std()) if len(all_prices) > 1 else 0.0
+    if not pd.notna(price_scale) or price_scale <= 0:
+        price_scale = max(float(all_prices.abs().median()) * 0.01, 0.01)
+    max_abs_distance = max_atr * price_scale
+
+    keep_poc = set()
+    keep_ib = set()
+    for poc_idx, poc_row in poc.iterrows():
+        distances = (ib["LevelPrice"] - float(poc_row["LevelPrice"])).abs()
+        matched = ib[distances <= max_abs_distance]
+        if not matched.empty:
+            keep_poc.add(poc_idx)
+            keep_ib.update(matched.index.tolist())
+
+    return pd.concat([poc.loc[sorted(keep_poc)], ib.loc[sorted(keep_ib)]], ignore_index=True)
 
 
 def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
     ohlcv_idx = ohlcv.copy().set_index("Date")
     fig = go.Figure()
-
     history_start = ohlcv_idx.index.max() - pd.DateOffset(months=settings.months_back)
     chart_df = ohlcv_idx[ohlcv_idx.index >= history_start].copy()
     if chart_df.empty:
@@ -260,40 +398,48 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
     ))
 
     legend_done: set[str] = set()
+    chart_end = chart_df.index.max()
     for _, row in levels.iterrows():
-        style = PERIOD_STYLES[row["PeriodType"]]
-        x0 = pd.Timestamp(row["PeriodStart"]) if settings.extend_from_period_start else pd.Timestamp(row["PeriodEnd"])
+        style = STYLE_MAP.get(str(row["PeriodType"]), {"label": row["PeriodType"], "color": "#CBD5E1", "width": 1.8, "dash": "solid"})
+        anchor_col = "AnchorStart" if settings.extend_from_activation or row["Source"] == "IB" else "PeriodEnd"
+        x0 = pd.Timestamp(row.get(anchor_col, row.get("PeriodEnd")))
+        if pd.isna(x0):
+            x0 = pd.Timestamp(row.get("PeriodEnd"))
         if x0 < chart_df.index.min():
             x0 = chart_df.index.min()
-
+        x1 = pd.Timestamp(row["DisplayUntil"]) if pd.notna(row.get("DisplayUntil")) else chart_end
+        if x1 > chart_end:
+            x1 = chart_end
+        if x1 < chart_df.index.min():
+            continue
         opacity = 0.95 if bool(row["Valid"]) else 0.35
-        label_suffix = "valid" if bool(row["Valid"]) else "tested"
-
+        name = style["label"]
+        hover_text = (
+            f"<b>{row['Source']} – {name}</b><br>"
+            f"Level: {row['LevelName']}<br>"
+            f"Period: {row['Period']}<br>"
+            f"Price: {float(row['LevelPrice']):.2f}<br>"
+            f"Distance: {float(row['SignedDist']):+.2f}<br>"
+            f"Status: {row['Status']}<br>"
+            f"<extra></extra>"
+        )
         fig.add_trace(go.Scatter(
-            x=[x0, chart_df.index.max()],
-            y=[row["POC"], row["POC"]],
+            x=[x0, x1],
+            y=[row["LevelPrice"], row["LevelPrice"]],
             mode="lines",
             line=dict(color=style["color"], width=style["width"], dash=style["dash"]),
             opacity=opacity,
-            name=style["label"],
-            legendgroup=row["PeriodType"],
-            showlegend=row["PeriodType"] not in legend_done,
-            hovertemplate=(
-                f"<b>{style['label']} POC</b><br>"
-                f"Period: {row['Period']}<br>"
-                f"POC: {row['POC']:.2f}<br>"
-                f"Distance: {row['SignedDist']:+.2f}<br>"
-                f"Status: {label_suffix}<br>"
-                "<extra></extra>"
-            ),
+            name=name,
+            legendgroup=str(row["PeriodType"]),
+            showlegend=str(row["PeriodType"]) not in legend_done,
+            hovertemplate=hover_text,
         ))
-        legend_done.add(row["PeriodType"])
-
+        legend_done.add(str(row["PeriodType"]))
         if settings.show_labels:
             fig.add_annotation(
-                x=chart_df.index.max(),
-                y=row["POC"],
-                text=f"{style['label']} {row['POC']:.2f}",
+                x=x1,
+                y=row["LevelPrice"],
+                text=f"{row['LevelName']} {float(row['LevelPrice']):.2f}",
                 showarrow=False,
                 xanchor="left",
                 xshift=8,
@@ -313,14 +459,13 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
         annotation_text=f"Last {last_close:.2f}",
         annotation_position="top left",
     )
-
     fig.update_layout(
-        title=dict(text=f"<b>{ticker}</b> – POC dashboard", x=0.02),
+        title=dict(text=f"<b>{ticker}</b> – Level dashboard ({settings.display_mode})", x=0.02),
         template="plotly_dark",
         paper_bgcolor="#0B1220",
         plot_bgcolor="#0B1220",
-        height=760,
-        margin=dict(l=20, r=140 if settings.show_labels else 30, t=70, b=30),
+        height=780,
+        margin=dict(l=20, r=180 if settings.show_labels else 30, t=70, b=30),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
         xaxis=dict(
@@ -337,25 +482,37 @@ def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings
 def format_table(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    table = df[[
-        "PeriodType", "Period", "POC", "LastPrice", "SignedDist", "AbsDist",
-        "Valid", "Touched", "TouchDate", "PeriodStart", "PeriodEnd", "POC_Volume"
-    ]].copy()
+    cols = [
+        "Source", "PeriodType", "LevelFamily", "LevelName", "Period", "LevelPrice", "LastPrice",
+        "SignedDist", "AbsDist", "Status", "TouchDate", "PeriodStart", "PeriodEnd", "AnchorStart"
+    ]
+    existing = [c for c in cols if c in df.columns]
+    table = df[existing].copy()
     return table.rename(columns={
         "PeriodType": "Type",
+        "LevelFamily": "Family",
+        "LevelPrice": "Price",
         "LastPrice": "Last",
         "SignedDist": "Dist",
-        "POC_Volume": "POC_Vol",
+        "TouchDate": "TestedAt",
         "PeriodStart": "Start",
         "PeriodEnd": "End",
+        "AnchorStart": "ActiveFrom",
     })
 
 
-def metric_block(levels: pd.DataFrame) -> tuple[int, int, float | None]:
-    total = len(levels)
-    valid = int(levels["Valid"].sum()) if not levels.empty else 0
+def metric_block(levels: pd.DataFrame) -> dict[str, str | int]:
+    if levels.empty:
+        return {"total": 0, "active": 0, "tested": 0, "nearest": "—", "poc": 0, "ib": 0}
     nearest = float(levels["SignedDist"].iloc[0]) if not levels.empty else None
-    return total, valid, nearest
+    return {
+        "total": int(len(levels)),
+        "active": int(levels["Valid"].sum()),
+        "tested": int((~levels["Valid"]).sum()),
+        "nearest": "—" if nearest is None else f"{nearest:+.2f}",
+        "poc": int((levels["Source"] == "POC").sum()),
+        "ib": int((levels["Source"] == "IB").sum()),
+    }
 
 
 def resolve_source_files(source: DataSource, ticker: str) -> tuple[Path, Path]:
@@ -364,35 +521,86 @@ def resolve_source_files(source: DataSource, ticker: str) -> tuple[Path, Path]:
     return raw_path, poc_path
 
 
-def sidebar_controls(sources: dict[str, DataSource], default_source: str, tickers: Iterable[str]) -> tuple[str, str, ChartSettings]:
-    st.sidebar.header("Nastavení")
-    source_name = st.sidebar.selectbox("Zdroj dat", options=list(sources.keys()), index=list(sources.keys()).index(default_source))
-    ticker = st.sidebar.selectbox("Ticker", options=list(tickers))
+def build_ib_settings_from_sidebar() -> dict:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("IB výpočet")
+    monthly_enabled = st.sidebar.checkbox("Monthly IB", value=True)
+    yearly_enabled = st.sidebar.checkbox("Yearly IB", value=True)
+    standard_projection_enabled = st.sidebar.checkbox("Standard projekce", value=True)
+    fibonacci_projection_enabled = st.sidebar.checkbox("Fib projekce", value=False)
+    standard_multipliers = st.sidebar.multiselect(
+        "Standard multipliers",
+        options=[1.0, 1.5, 2.0, 3.0],
+        default=[1.0, 1.5, 2.0, 3.0],
+    )
+    fibonacci_multipliers = st.sidebar.multiselect(
+        "Fib multipliers",
+        options=[0.618, 1.0, 1.272, 1.618, 2.618],
+        default=[0.618, 1.0, 1.272, 1.618, 2.618],
+    )
+    return {
+        "enabled": True,
+        "yearly_enabled": yearly_enabled,
+        "monthly_enabled": monthly_enabled,
+        "monthly_mode": "first_5_trading_days",
+        "hold_until_tested": True,
+        "standard_projection_enabled": standard_projection_enabled,
+        "standard_multipliers": standard_multipliers or [1.0, 1.5, 2.0, 3.0],
+        "fibonacci_projection_enabled": fibonacci_projection_enabled,
+        "fibonacci_multipliers": fibonacci_multipliers or [0.618, 1.0, 1.272, 1.618, 2.618],
+    }
 
-    selected_periods = st.sidebar.multiselect("Zobrazit periody", ["weekly", "monthly", "yearly"], default=["monthly", "yearly"])
-    show_only_untouched = st.sidebar.checkbox("Pouze validní / dosud netestované levely", value=False)
+
+def sidebar_controls(sources: dict[str, DataSource], default_source: str, tickers: Iterable[str]) -> tuple[str, str, ChartSettings, dict]:
+    st.sidebar.header("Nastavení")
+    source_names = list(sources.keys())
+    source_name = st.sidebar.selectbox("Zdroj dat", options=source_names, index=source_names.index(default_source))
+    ticker = st.sidebar.selectbox("Ticker", options=list(tickers))
+    display_mode = st.sidebar.radio("Režim zobrazení", DISPLAY_MODE_OPTIONS, index=2)
+
+    selected_poc_periods = st.sidebar.multiselect("POC periody", POC_PERIODS, default=["monthly", "yearly"])
+    selected_ib_periods = st.sidebar.multiselect(
+        "IB typy",
+        IB_PERIODS,
+        default=["monthly_ib", "yearly_ib", "monthly_ib_std", "yearly_ib_std"],
+    )
+    selected_ib_families = st.sidebar.multiselect(
+        "IB rodiny",
+        IB_FAMILIES,
+        default=["ib_core", "ib_standard"],
+    )
+    level_status = st.sidebar.selectbox("Stav levelu", ["All", "Only active", "Only tested"], index=0)
     nearest_only = st.sidebar.checkbox("Zobrazit jen nejbližší levely", value=True)
-    nearest_count = st.sidebar.slider("Počet nejbližších levelů", 1, 12, 6)
-    months_back = st.sidebar.slider("Kolik měsíců historie v grafu", 3, 36, 12)
+    nearest_count = st.sidebar.slider("Počet nejbližších levelů", 1, 20, 8)
+    months_back = st.sidebar.slider("Kolik měsíců historie v grafu", 3, 48, 12)
     show_labels = st.sidebar.checkbox("Popisky levelů vpravo", value=True)
-    extend_from_period_start = st.sidebar.checkbox("Vést čáru od začátku periody", value=False)
+    extend_from_activation = st.sidebar.checkbox("Vést čáru od aktivace / konce periody", value=True)
+    show_confluence_only = st.sidebar.checkbox("V režimu POC + IB ukázat jen konfluence", value=False)
+    confluence_max_atr = st.sidebar.slider("Confluence šířka (proxy ATR)", 0.05, 1.00, 0.25, 0.05)
+
+    ib_settings = build_ib_settings_from_sidebar()
 
     settings = ChartSettings(
-        selected_periods=selected_periods,
-        show_only_untouched=show_only_untouched,
+        display_mode=display_mode,
+        selected_poc_periods=selected_poc_periods,
+        selected_ib_periods=selected_ib_periods,
+        selected_ib_families=selected_ib_families,
+        level_status=level_status,
         show_labels=show_labels,
         nearest_only=nearest_only,
         nearest_count=nearest_count,
         months_back=months_back,
-        extend_from_period_start=extend_from_period_start,
+        extend_from_activation=extend_from_activation,
+        show_confluence_only=show_confluence_only,
+        confluence_max_atr=confluence_max_atr,
     )
-    return source_name, ticker, settings
+    return source_name, ticker, settings, ib_settings
 
 
 def main() -> None:
-    st.set_page_config(page_title="POC Dashboard", layout="wide")
-    st.title("POC Dashboard")
-    st.caption("Čte lokální raw a processed data projektu. Žádné dvojí stahování cen.")
+    st.set_page_config(page_title="Level Dashboard", layout="wide")
+    st.title("Level Dashboard")
+    st.caption("Vizuální kontrola POC a IB levelů nad lokálními daty.")
 
     default_settings_path = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
     settings_path = Path(st.sidebar.text_input("Settings YAML", value=str(default_settings_path)))
@@ -410,7 +618,7 @@ def main() -> None:
         st.error(f"V processed složce nejsou nalezené žádné *_poc.csv soubory: {sources[default_source].processed_data_dir}")
         st.stop()
 
-    source_name, ticker, chart_settings = sidebar_controls(sources, default_source, tickers)
+    source_name, ticker, chart_settings, ib_settings = sidebar_controls(sources, default_source, tickers)
     source = sources[source_name]
     raw_path, poc_path = resolve_source_files(source, ticker)
 
@@ -418,46 +626,47 @@ def main() -> None:
     st.sidebar.caption(f"Raw: `{raw_path}`")
     st.sidebar.caption(f"POC: `{poc_path}`")
 
-    ohlcv = None
-    poc_levels = None
-
     try:
         ohlcv = load_ohlcv_from_csv(str(raw_path))
     except Exception as exc:
         st.error(f"Nepodařilo se načíst raw data pro {ticker}: {exc}")
         st.stop()
 
+    poc_levels = pd.DataFrame()
     try:
         poc_levels = load_poc_data(str(poc_path), ticker_hint=ticker)
     except Exception as exc:
-        st.error(f"Nepodařilo se načíst POC data pro {ticker}: {exc}")
+        st.warning(f"POC data se nepodařilo načíst: {exc}")
+
+    ib_levels = pd.DataFrame()
+    try:
+        ib_levels = compute_ib_levels_from_ohlcv(str(raw_path), ticker=ticker, ib_settings_dict=ib_settings)
+    except Exception as exc:
+        st.warning(f"IB data se nepodařilo spočítat: {exc}")
+
+    prepared_frames: list[pd.DataFrame] = []
+    ticker_poc = poc_levels[poc_levels.get("Ticker", "").astype(str).str.upper() == ticker].copy() if not poc_levels.empty else pd.DataFrame()
+    if not ticker_poc.empty:
+        prepared_frames.append(prepare_poc_levels(ticker_poc, ohlcv))
+    if not ib_levels.empty:
+        prepared_frames.append(prepare_ib_levels(ib_levels, ohlcv))
+
+    if not prepared_frames:
+        st.error("Nepodařilo se připravit žádné POC ani IB levely pro zobrazení.")
         st.stop()
 
-    if ohlcv is None:
-        st.error("OHLCV data nebyla načtena.")
-        st.stop()
+    unified = pd.concat(prepared_frames, ignore_index=True)
+    filtered = filter_unified_levels(unified, chart_settings)
 
-    if poc_levels is None:
-        st.error("POC data nebyla načtena.")
-        st.stop()
+    metrics = metric_block(filtered)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Zobrazené levely", metrics["total"])
+    c2.metric("Aktivní", metrics["active"])
+    c3.metric("Testované", metrics["tested"])
+    c4.metric("POC", metrics["poc"])
+    c5.metric("IB", metrics["ib"])
+    c6.metric("Nejbližší distance", metrics["nearest"])
 
-    ticker_levels = poc_levels[poc_levels["Ticker"] == ticker].copy()
-    if ticker_levels.empty:
-        st.warning(f"Pro ticker {ticker} nebyly v POC souboru nalezeny žádné levely.")
-        st.stop()
-
-    enriched = enrich_levels(ticker_levels, ohlcv)
-    filtered = filter_levels(enriched, chart_settings)
-
-    total, valid_count, nearest_dist = metric_block(filtered)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Zobrazené levely", total)
-    c2.metric("Validní levely", valid_count)
-    c3.metric("Nejbližší distance", "—" if nearest_dist is None else f"{nearest_dist:+.2f}")
-
-    if not chart_settings.selected_periods:
-        st.info("Vyber alespoň jednu periodu v levém panelu.")
-        st.stop()
     if filtered.empty:
         st.warning("Po zvolených filtrech nezůstal žádný level.")
         st.stop()
@@ -471,28 +680,29 @@ def main() -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "POC": st.column_config.NumberColumn(format="%.2f"),
+            "Price": st.column_config.NumberColumn(format="%.2f"),
             "Last": st.column_config.NumberColumn(format="%.2f"),
             "Dist": st.column_config.NumberColumn(format="%+.2f"),
             "AbsDist": st.column_config.NumberColumn(format="%.2f"),
-            "POC_Vol": st.column_config.NumberColumn(format="%.0f"),
-            "TouchDate": st.column_config.DateColumn(format="YYYY-MM-DD"),
+            "TestedAt": st.column_config.DateColumn(format="YYYY-MM-DD"),
             "Start": st.column_config.DateColumn(format="YYYY-MM-DD"),
             "End": st.column_config.DateColumn(format="YYYY-MM-DD"),
+            "ActiveFrom": st.column_config.DateColumn(format="YYYY-MM-DD"),
         },
     )
 
     st.download_button(
         "Stáhnout aktuálně filtrovanou tabulku",
         data=table.to_csv(index=False).encode("utf-8"),
-        file_name=f"{ticker}_poc_levels_filtered.csv",
+        file_name=f"{ticker}_levels_filtered.csv",
         mime="text/csv",
     )
 
-    with st.expander("Jak číst distance"):
+    with st.expander("Jak číst dashboard"):
         st.write(
-            "Distance je počítaná jako poslední cena mínus POC. Kladná hodnota znamená, že aktuální cena je nad levelem. "
-            "Záporná hodnota znamená, že cena je pod levelem."
+            "POC levely se berou z processed POC CSV. IB levely se počítají přímo z raw OHLCV dat. "
+            "V režimu POC + IB se zobrazují obě vrstvy zároveň. Aktivní IB level končí až při prvním testu, "
+            "takže můžeš vizuálně ověřit, jestli životnost a projekce sedí." 
         )
 
 
