@@ -51,17 +51,17 @@ def _level_row(*, ticker: str, period_type: str, period: str, level_name: str, l
 
 
 def _normalize_standard_multipliers(settings: dict) -> list[float]:
-    requested = settings.get("standard_multipliers", [1.5, 2.0])
+    requested = settings.get("standard_multipliers", [1.5, 2.0, 3.0])
     allowed = []
     for m in requested:
         try:
             m = float(m)
         except Exception:
             continue
-        if m in {1.5, 2.0} and m not in allowed:
+        if m in {1.5, 2.0, 3.0} and m not in allowed:
             allowed.append(m)
     if not allowed:
-        allowed = [1.5, 2.0]
+        allowed = [1.5, 2.0, 3.0]
     return sorted(allowed)
 
 
@@ -76,8 +76,10 @@ def _build_standard_rows(*, ticker: str, period_type: str, period: str, period_s
     #   100  = IB high
     #   150  = high + 0.5 * range
     #   200  = high + 1.0 * range
+    #   300  = high + 2.0 * range
     #   -150 = low  - 0.5 * range
     #   -200 = low  - 1.0 * range
+    #   -300 = low  - 2.0 * range
     rows.append(_level_row(
         ticker=ticker, period_type=period_type, period=period,
         level_name=f"{prefix}_0", level_badge="0", level_price=ib_low,
