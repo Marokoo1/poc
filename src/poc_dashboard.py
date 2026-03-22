@@ -507,43 +507,65 @@ def apply_confluence_filter(levels: pd.DataFrame, max_atr: float) -> pd.DataFram
 
 def format_level_badge(row: pd.Series) -> str:
     source = str(row.get("Source", "")).upper()
-    period_type = str(row.get("PeriodType", "")).lower()
+    period_type = str(row.get("PeriodType", "")).lower().strip()
     period = str(row.get("Period", "")).strip()
-    level_name = str(row.get("LevelName", "")).upper()
+    level_name = str(row.get("LevelName", "")).upper().strip()
 
-    if source == "IB":
-        if level_name.endswith("IBL"):
-            return "0"
-        if level_name.endswith("IBH"):
-            return "100"
-        if "_150_UP" in level_name:
-            return "150"
-        if "_200_UP" in level_name:
-            return "200"
-        if "_300_UP" in level_name:
-            return "300"
-        if "_150_DN" in level_name:
-            return "-150"
-        if "_200_DN" in level_name:
-            return "-200"
-        if "_300_DN" in level_name:
-            return "-300"
-        if "_100_UP" in level_name:
-            return "100?"
-        if "_100_DN" in level_name:
-            return "-100?"
-        return level_name
+    if source != "IB":
+        if period_type == "weekly":
+            return f"W {period}"
+        if period_type == "monthly":
+            return f"M {period}"
+        if period_type == "yearly":
+            return f"Y {period}"
+        return period
 
-    if period_type == "weekly":
-        bucket = "W"
-    elif period_type == "monthly":
-        bucket = "M"
-    elif period_type == "yearly":
-        bucket = "Y"
-    else:
-        bucket = "P"
+    # ---- IB badge prefix from Period
+    # yearly:  2025    -> Y 25
+    # monthly: 2025-06 -> M06 25
+    prefix = "IB"
+    if "yearly" in period_type:
+        try:
+            yy = int(period[:4]) % 100
+            prefix = f"Y {yy:02d}"
+        except Exception:
+            prefix = f"Y {period}"
+    elif "monthly" in period_type:
+        try:
+            yyyy, mm = period.split("-")
+            yy = int(yyyy) % 100
+            prefix = f"M{int(mm):02d} {yy:02d}"
+        except Exception:
+            prefix = f"M {period}"
 
-    return f"{bucket} {period}".strip()
+    # ---- Map current internal names to requested labels
+    if level_name.endswith("IBL"):
+        return f"{prefix} 0"
+
+    if level_name.endswith("IBH"):
+        return f"{prefix} 100"
+
+    if "_150_UP" in level_name:
+        return f"{prefix} 150"
+    if "_200_UP" in level_name:
+        return f"{prefix} 200"
+    if "_300_UP" in level_name:
+        return f"{prefix} 300"
+
+    if "_150_DN" in level_name:
+        return f"{prefix} -150"
+    if "_200_DN" in level_name:
+        return f"{prefix} -200"
+    if "_300_DN" in level_name:
+        return f"{prefix} -300"
+
+    # staré / podezřelé levely nech viditelné, ale označené
+    if "_100_UP" in level_name:
+        return f"{prefix} 100?"
+    if "_100_DN" in level_name:
+        return f"{prefix} -100?"
+
+    return f"{prefix} {level_name}"
 
 def build_chart(ohlcv: pd.DataFrame, levels: pd.DataFrame, ticker: str, settings: ChartSettings) -> go.Figure:
     ohlcv_idx = ohlcv.copy().set_index("Date")
