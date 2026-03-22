@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-
 STANDARD_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
 
@@ -32,8 +31,8 @@ def _level_row(
     ticker: str,
     period_type: str,
     period: str,
-    level_family: str,
     level_name: str,
+    badge: str,
     level_price: float,
     period_start: pd.Timestamp,
     period_end: pd.Timestamp,
@@ -48,8 +47,9 @@ def _level_row(
         "PeriodType": period_type,
         "Period": period,
         "LevelSource": "IB",
-        "LevelFamily": level_family,
+        "LevelFamily": "ib",
         "LevelName": level_name,
+        "LevelBadge": badge,
         "LevelPrice": round(float(level_price), 6),
         "POC": round(float(level_price), 6),
         "PeriodStart": pd.Timestamp(period_start),
@@ -63,13 +63,11 @@ def _level_row(
     }
 
 
-def _build_projection_rows(
+def _build_corrected_standard_rows(
     *,
     ticker: str,
     period_type: str,
     period: str,
-    family: str,
-    multipliers: list[float],
     period_start: pd.Timestamp,
     period_end: pd.Timestamp,
     active_from: pd.Timestamp | None,
@@ -77,23 +75,123 @@ def _build_projection_rows(
     ib_low: float,
     ib_range: float,
     prefix: str,
+    multipliers: list[float],
 ) -> list[dict]:
     rows: list[dict] = []
+
+    # User-defined set semantics:
+    # 0   = IB low
+    # 100 = IB high
+    # 150/200/300 above high continue from the same 0-100 range
+    # -150/-200/-300 below low on the opposite side
+    rows.append(
+        _level_row(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level_name=f"{prefix}_0",
+            badge="0",
+            level_price=ib_low,
+            period_start=period_start,
+            period_end=period_end,
+            active_from=active_from,
+            ib_high=ib_high,
+            ib_low=ib_low,
+            ib_range=ib_range,
+            multiplier=0.0,
+        )
+    )
+    rows.append(
+        _level_row(
+            ticker=ticker,
+            period_type=period_type,
+            period=period,
+            level_name=f"{prefix}_100",
+            badge="100",
+            level_price=ib_high,
+            period_start=period_start,
+            period_end=period_end,
+            active_from=active_from,
+            ib_high=ib_high,
+            ib_low=ib_low,
+            ib_range=ib_range,
+            multiplier=1.0,
+        )
+    )
+
     for m in multipliers:
         m = float(m)
-        label = str(m).replace(".", "") if m % 1 else str(int(m * 100))
-        if m < 1 and "." in str(m):
-            label = f"{int(round(m * 1000)):04d}"
-        else:
-            label = f"{int(round(m * 100)):03d}"
+        if m <= 1.0:
+            continue
+        label = str(int(round(m * 100)))
+
+        # positive side measured from low as 0..100 range
         rows.append(
             _level_row(
                 ticker=ticker,
                 period_type=period_type,
                 period=period,
-                level_family=family,
-                level_name=f"{prefix}_{label}_UP",
-                level_price=ib_high + (m * ib_range),
+                level_name=f"{prefix}_{label}",
+                badge=label,
+                level_price=ib_low + (m * ib_range),
+                period_start=period_start,
+                period_end=period_end,
+                active_from=active_from,
+                ib_high=ib_high,
+                ib_low=ib_low,
+                ib_range=ib_range,
+                multiplier=m,
+            )
+        )
+
+        # negative side below low
+        rows.append(
+            _level_row(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_name=f"{prefix}_NEG{label}",
+                badge=f"-{label}",
+                level_price=ib_low - (m * ib_range),
+                period_start=period_start,
+                period_end=period_end,
+                active_from=active_from,
+                ib_high=ib_high,
+                ib_low=ib_low,
+                ib_range=ib_range,
+                multiplier=-m,
+            )
+        )
+
+    return rows
+
+
+def _build_fib_rows(
+    *,
+    ticker: str,
+    period_type: str,
+    period: str,
+    period_start: pd.Timestamp,
+    period_end: pd.Timestamp,
+    active_from: pd.Timestamp | None,
+    ib_high: float,
+    ib_low: float,
+    ib_range: float,
+    prefix: str,
+    multipliers: list[float],
+) -> list[dict]:
+    rows: list[dict] = []
+    for m in multipliers:
+        m = float(m)
+        label = f"F{str(m).replace('.', '_')}"
+        rows.append(
+            _level_row(
+                ticker=ticker,
+                period_type=period_type,
+                period=period,
+                level_name=f"{prefix}_{label}",
+                badge=label,
+                level_price=ib_low + (m * ib_range),
                 period_start=period_start,
                 period_end=period_end,
                 active_from=active_from,
@@ -108,8 +206,8 @@ def _build_projection_rows(
                 ticker=ticker,
                 period_type=period_type,
                 period=period,
-                level_family=family,
-                level_name=f"{prefix}_{label}_DN",
+                level_name=f"{prefix}_NEG{label}",
+                badge=f"- {label}",
                 level_price=ib_low - (m * ib_range),
                 period_start=period_start,
                 period_end=period_end,
@@ -117,7 +215,7 @@ def _build_projection_rows(
                 ib_high=ib_high,
                 ib_low=ib_low,
                 ib_range=ib_range,
-                multiplier=m,
+                multiplier=-m,
             )
         )
     return rows
@@ -127,10 +225,8 @@ def calculate_monthly_ib_levels(df: pd.DataFrame, ticker: str, settings: dict) -
     prices = _prepare_dataframe(df)
     if prices.empty or not settings.get("monthly_enabled", True):
         return pd.DataFrame()
-
     prices["Month"] = prices["Date"].dt.to_period("M").astype(str)
     rows: list[dict] = []
-
     for period, group in prices.groupby("Month", sort=True):
         window = group.head(5).copy()
         if len(window) < 5:
@@ -141,35 +237,37 @@ def calculate_monthly_ib_levels(df: pd.DataFrame, ticker: str, settings: dict) -
         period_start = pd.Timestamp(window["Date"].min())
         period_end = pd.Timestamp(window["Date"].max())
         active_from = _first_row_after_date(prices, period_end)
-        base_type = "monthly_ib"
-
-        rows.append(_level_row(
-            ticker=ticker, period_type=base_type, period=period, level_family="ib_core",
-            level_name="M_IBH", level_price=ib_high, period_start=period_start, period_end=period_end,
-            active_from=active_from, ib_high=ib_high, ib_low=ib_low, ib_range=ib_range
-        ))
-        rows.append(_level_row(
-            ticker=ticker, period_type=base_type, period=period, level_family="ib_core",
-            level_name="M_IBL", level_price=ib_low, period_start=period_start, period_end=period_end,
-            active_from=active_from, ib_high=ib_high, ib_low=ib_low, ib_range=ib_range
-        ))
-
-        if settings.get("standard_projection_enabled", True) and ib_range > 0:
-            rows.extend(_build_projection_rows(
-                ticker=ticker, period_type="monthly_ib_std", period=period, family="ib_standard",
-                multipliers=list(settings.get("standard_multipliers", [1.0, 1.5, 2.0, 3.0])),
-                period_start=period_start, period_end=period_end, active_from=active_from,
-                ib_high=ib_high, ib_low=ib_low, ib_range=ib_range, prefix="M_IB"
-            ))
-
+        rows.extend(
+            _build_corrected_standard_rows(
+                ticker=ticker,
+                period_type="monthly_ib",
+                period=period,
+                period_start=period_start,
+                period_end=period_end,
+                active_from=active_from,
+                ib_high=ib_high,
+                ib_low=ib_low,
+                ib_range=ib_range,
+                prefix="M_IB",
+                multipliers=list(settings.get("standard_multipliers", [1.5, 2.0, 3.0])),
+            )
+        )
         if settings.get("fibonacci_projection_enabled", False) and ib_range > 0:
-            rows.extend(_build_projection_rows(
-                ticker=ticker, period_type="monthly_ib_fib", period=period, family="ib_fib",
-                multipliers=list(settings.get("fibonacci_multipliers", [0.618, 1.0, 1.272, 1.618, 2.618])),
-                period_start=period_start, period_end=period_end, active_from=active_from,
-                ib_high=ib_high, ib_low=ib_low, ib_range=ib_range, prefix="M_IB_FIB"
-            ))
-
+            rows.extend(
+                _build_fib_rows(
+                    ticker=ticker,
+                    period_type="monthly_ib_fib",
+                    period=period,
+                    period_start=period_start,
+                    period_end=period_end,
+                    active_from=active_from,
+                    ib_high=ib_high,
+                    ib_low=ib_low,
+                    ib_range=ib_range,
+                    prefix="M_IB_FIB",
+                    multipliers=list(settings.get("fibonacci_multipliers", [1.272, 1.618, 2.618])),
+                )
+            )
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
@@ -180,11 +278,9 @@ def calculate_yearly_ib_levels(df: pd.DataFrame, ticker: str, settings: dict) ->
     prices = _prepare_dataframe(df)
     if prices.empty or not settings.get("yearly_enabled", True):
         return pd.DataFrame()
-
     prices["Year"] = prices["Date"].dt.year.astype(int)
     prices["MonthNum"] = prices["Date"].dt.month.astype(int)
     rows: list[dict] = []
-
     for year, group in prices.groupby("Year", sort=True):
         window = group[group["MonthNum"].isin([1, 2])].copy()
         if window.empty:
@@ -198,35 +294,37 @@ def calculate_yearly_ib_levels(df: pd.DataFrame, ticker: str, settings: dict) ->
         period_start = pd.Timestamp(window["Date"].min())
         period_end = pd.Timestamp(window["Date"].max())
         active_from = _first_row_after_date(prices, period_end)
-        base_type = "yearly_ib"
-
-        rows.append(_level_row(
-            ticker=ticker, period_type=base_type, period=period, level_family="ib_core",
-            level_name="Y_IBH", level_price=ib_high, period_start=period_start, period_end=period_end,
-            active_from=active_from, ib_high=ib_high, ib_low=ib_low, ib_range=ib_range
-        ))
-        rows.append(_level_row(
-            ticker=ticker, period_type=base_type, period=period, level_family="ib_core",
-            level_name="Y_IBL", level_price=ib_low, period_start=period_start, period_end=period_end,
-            active_from=active_from, ib_high=ib_high, ib_low=ib_low, ib_range=ib_range
-        ))
-
-        if settings.get("standard_projection_enabled", True) and ib_range > 0:
-            rows.extend(_build_projection_rows(
-                ticker=ticker, period_type="yearly_ib_std", period=period, family="ib_standard",
-                multipliers=list(settings.get("standard_multipliers", [1.0, 1.5, 2.0, 3.0])),
-                period_start=period_start, period_end=period_end, active_from=active_from,
-                ib_high=ib_high, ib_low=ib_low, ib_range=ib_range, prefix="Y_IB"
-            ))
-
+        rows.extend(
+            _build_corrected_standard_rows(
+                ticker=ticker,
+                period_type="yearly_ib",
+                period=period,
+                period_start=period_start,
+                period_end=period_end,
+                active_from=active_from,
+                ib_high=ib_high,
+                ib_low=ib_low,
+                ib_range=ib_range,
+                prefix="Y_IB",
+                multipliers=list(settings.get("standard_multipliers", [1.5, 2.0, 3.0])),
+            )
+        )
         if settings.get("fibonacci_projection_enabled", False) and ib_range > 0:
-            rows.extend(_build_projection_rows(
-                ticker=ticker, period_type="yearly_ib_fib", period=period, family="ib_fib",
-                multipliers=list(settings.get("fibonacci_multipliers", [0.618, 1.0, 1.272, 1.618, 2.618])),
-                period_start=period_start, period_end=period_end, active_from=active_from,
-                ib_high=ib_high, ib_low=ib_low, ib_range=ib_range, prefix="Y_IB_FIB"
-            ))
-
+            rows.extend(
+                _build_fib_rows(
+                    ticker=ticker,
+                    period_type="yearly_ib_fib",
+                    period=period,
+                    period_start=period_start,
+                    period_end=period_end,
+                    active_from=active_from,
+                    ib_high=ib_high,
+                    ib_low=ib_low,
+                    ib_range=ib_range,
+                    prefix="Y_IB_FIB",
+                    multipliers=list(settings.get("fibonacci_multipliers", [1.272, 1.618, 2.618])),
+                )
+            )
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
